@@ -1,8 +1,8 @@
-// src/index.ts - Orion Worker Entry Point (WebSocket Fix)
+// src/index.ts - Orion Worker Entry Point (REFACTORED)
 
 import { OrionAgent } from './durable-agent';
 import { D1Manager } from './storage/d1-manager';
-import type { Env, Session } from './types';
+import type { Env } from './types';
 
 export { OrionAgent };
 
@@ -159,7 +159,7 @@ async function handleD1Status(env: Env): Promise<Response> {
 }
 
 // =============================================================
-// Durable Object Routing (WEBSOCKET FIX)
+// Durable Object Routing
 // =============================================================
 
 async function routeToDurableObject(
@@ -198,8 +198,7 @@ async function routeToDurableObject(
       );
     }
 
-    // ✅ FIX: Create a new request with the session ID in header
-    // This ensures the DO receives the session ID
+    // Forward request with session ID
     const url = new URL(request.url);
     const headers = new Headers(request.headers);
     headers.set('X-Session-ID', sessionId);
@@ -210,7 +209,6 @@ async function routeToDurableObject(
       body: request.body,
     });
 
-    // Forward to Durable Object
     return await stub.fetch(forwardedRequest);
   } catch (err: any) {
     console.error('[Worker] DO routing error:', err);
@@ -266,8 +264,9 @@ export default {
 
         return jsonResponse({
           status: 'ok',
-          name: 'Orion Multi-Agent System',
-          version: '2.0.0',
+          name: 'Orion Multi-Agent System (Refactored)',
+          version: '3.0.0',
+          architecture: 'DO Orchestrator Pattern',
           d1: d1Status,
           authEnabled: !!env.JWT_SECRET,
         });
@@ -283,7 +282,7 @@ export default {
         return handleD1Status(env);
       }
 
-      // Session management routes (not forwarded to DO)
+      // Session management routes
       if (path === '/api/sessions') {
         if (request.method === 'GET') return handleSessionList(env);
         if (request.method === 'POST') return handleSessionCreate(request, env);
@@ -295,12 +294,11 @@ export default {
         if (request.method === 'DELETE') return handleSessionDelete(sessionId, env);
       }
 
-      // ✅ All other /api/* routes go to Durable Object
-      // This includes /api/ws for WebSocket connections
+      // All other /api/* routes go to Durable Object
       if (path.startsWith('/api/')) {
         const response = await routeToDurableObject(request, env, ctx);
         
-        // Add CORS headers to response
+        // Add CORS headers
         const newHeaders = new Headers(response.headers);
         Object.entries(corsHeaders).forEach(([k, v]) => newHeaders.set(k, v));
         
@@ -308,7 +306,6 @@ export default {
           status: response.status,
           statusText: response.statusText,
           headers: newHeaders,
-          // ✅ CRITICAL: Preserve webSocket from DO response
           webSocket: (response as any).webSocket,
         });
       }
