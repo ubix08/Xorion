@@ -6,7 +6,7 @@ import type { DurableObjectState } from '@cloudflare/workers-types';
 import type { Env, Message } from './types';
 import { GeminiClient } from './gemini';
 import { AdminAgent } from './admin/admin-agent';
-import { UnifiedStorage } from './storage/storage-simplified';
+import { UnifiedStorage } from './storage/d1-storage';
 import { SimplifiedMemoryManager } from './memory/memory-simplified';
 import { SimpleInit } from './core/initialization-simplified';
 
