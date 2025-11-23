@@ -315,7 +315,7 @@ export class UnifiedStorage {
     await this.executeReplication();
   }
 }
-
+export default UnifiedStorage;
 // =============================================================
 // USAGE EXAMPLE
 // =============================================================
