@@ -1,4 +1,4 @@
-// src/index-refactored.ts
+// src/index.ts
 // Worker entry point with Admin-Worker architecture
 
 import { AutonomousAgent } from './durable-agent';
