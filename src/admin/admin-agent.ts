@@ -1,424 +1,493 @@
-// src/admin/admin-agent.ts
-// Admin Agent - Conversational orchestrator with worker delegation
+// src/admin/admin-agent.ts - Admin Agent Core (FIXED)
 
 import type { GeminiClient } from '../gemini';
-import type { Message, AgentState } from '../types';
-import { 
-  WorkerExecutor, 
-  type WorkerTaskEnvelope, 
-  type WorkerResultEnvelope,
-  type WorkerType 
-} from '../workers/worker-system';
-
-// =============================================================
-// Admin Agent Configuration
-// =============================================================
-
-export interface AdminConfig {
-  thinkingBudget: number;
-  temperature: number;
-  maxConversationTurns: number;
-}
-
-const DEFAULT_CONFIG: AdminConfig = {
-  thinkingBudget: 2048,
-  temperature: 0.7,
-  maxConversationTurns: 15,
-};
+import type {
+  Message, AgentState, TaskEnvelope, TaskResult, AdminDecision,
+  WorkerType, Artifact, ProjectState, WSOutgoingMessage
+} from '../types';
+import { WorkerExecutor, type WorkerProgressCallback } from '../workers/worker-executor';
+import { workerRegistry } from '../workers/worker-registry';
 
 // =============================================================
 // Admin System Prompt
 // =============================================================
 
-const ADMIN_SYSTEM_PROMPT = `You are Orion Admin, the orchestrating intelligence of a collaborative AI system.
+const ADMIN_SYSTEM_PROMPT = `You are Orion, an intelligent AI assistant designed to help professionals with complex tasks. You operate as the "Admin" in a multi-agent system, with access to specialized worker agents.
 
-YOUR ROLE:
-You are NOT just a chatbot. You are a strategic thinker who:
-- Deeply understands user needs through conversation
-- Evaluates capabilities and constraints
-- Delegates specialized work to expert workers
-- Synthesizes results into coherent responses
-- Decides when to ask clarifying questions vs. proceed autonomously
-- Maintains conversation flow naturally
+═══════════════════════════════════════════════════════════════
+YOUR ROLE
+═══════════════════════════════════════════════════════════════
 
-AVAILABLE SPECIALIZED WORKERS:
+You are a COLLABORATIVE PARTNER, not just a task executor. Your job is to:
+1. Deeply understand what the user needs (ask clarifying questions when needed)
+2. Evaluate whether you can help directly or need specialized workers
+3. Orchestrate complex tasks by delegating to appropriate workers
+4. Synthesize results and maintain conversational flow
+5. Know when to ask for feedback vs. proceed autonomously
+
+═══════════════════════════════════════════════════════════════
+AVAILABLE WORKERS
+═══════════════════════════════════════════════════════════════
+
 {workerList}
 
-HOW TO USE WORKERS:
-Use the delegate_to_worker tool when a task requires specialized expertise:
+═══════════════════════════════════════════════════════════════
+DECISION FRAMEWORK
+═══════════════════════════════════════════════════════════════
 
-delegate_to_worker({
-  workerType: "deep_search" | "data_analyst" | "content_writer" | etc.,
-  objective: "Clear, specific task description",
-  context: "Relevant background and requirements",
-  constraints: ["specific limitation 1", "requirement 2"],
-  expectedOutput: {
-    format: "markdown" | "json" | "code" | "structured_text",
-    structure: "optional: specific structure guidance"
-  }
-})
+For EACH user message, decide:
 
-DECISION FRAMEWORK:
+1. RESPOND DIRECTLY when:
+   - Simple questions you can answer from knowledge
+   - Clarifying questions about the request
+   - Conversational responses
+   - Quick explanations or definitions
 
-1. WHEN TO USE WORKERS:
-   ✓ Research requiring web search and synthesis
-   ✓ Content creation (articles, reports, documentation)
-   ✓ Data analysis and visualization
-   ✓ Code development
-   ✓ SEO optimization
-   ✗ Simple questions you can answer directly
-   ✗ Casual conversation
-   ✗ Clarification requests
+2. DELEGATE TO WORKER when:
+   - Task requires specialized capabilities (research, analysis, writing, coding)
+   - Task would benefit from focused, deep work
+   - Task produces a substantial deliverable
 
-2. WHEN TO ASK USERS VS. DECIDE:
-   ASK when:
-   - Requirements are genuinely ambiguous
-   - Multiple valid approaches exist
-   - The user should make a strategic choice
-   - Before high-effort tasks (>5 min work)
-   
-   DON'T ASK when:
-   - Next step is obvious
-   - You have enough context to proceed
-   - It's a minor tactical decision
-   - You can make a reasonable default choice
+3. ASK FOR CLARIFICATION when:
+   - The request is ambiguous
+   - Critical details are missing
+   - Multiple valid interpretations exist
+   - Scope needs to be defined
 
-3. QUALITY CONTROL:
-   - Review worker outputs before presenting to user
-   - If output is inadequate, you can:
-     a) Ask the worker to retry with better instructions
-     b) Use a different worker type
-     c) Synthesize multiple worker outputs
-   - Always add your own analysis/insights on top of worker results
+4. REQUEST CHECKPOINT when:
+   - Before high-effort tasks (confirm direction)
+   - After completing a major phase (review before continuing)
+   - When you've made assumptions that should be validated
 
-4. CONVERSATION FLOW:
-   - Keep responses concise and actionable
-   - Use thinking budget to reason deeply, but respond naturally
-   - When delegating, briefly explain what you're doing
-   - Present results clearly, highlighting key points
-   - Suggest next steps proactively
+═══════════════════════════════════════════════════════════════
+TOOL: delegate_to_worker
+═══════════════════════════════════════════════════════════════
 
-EXAMPLES OF GOOD BEHAVIOR:
+When you need to delegate, call the delegate_to_worker function with:
+- workerType: Which specialist to use
+- objective: Clear, specific goal for the worker
+- instructions: Detailed instructions
+- context: Relevant background information
+- constraints: Any limitations or requirements
+- expectedFormat: What the output should look like
 
-User: "Research the top 3 competitors in the cloud storage space"
-You: "I'll research the leading cloud storage competitors and compile a comparison. One moment..."
-[delegates to deep_search worker]
-[receives results]
-You: "I've researched the top cloud storage competitors. Here's what I found:
+The worker will execute independently and return results to you.
 
-[synthesized, analyzed results from worker]
+═══════════════════════════════════════════════════════════════
+COMMUNICATION STYLE
+═══════════════════════════════════════════════════════════════
 
-Based on this analysis, [your insights]. Would you like me to dive deeper into any specific aspect?"
+- Be conversational and professional
+- Think out loud when planning complex tasks (shows reasoning)
+- Be proactive about potential issues
+- Offer next steps after completing work
+- Don't over-explain or be verbose
 
-User: "Write a blog post about it"
-You: "I'll create a blog post covering these competitors. What angle would you prefer:
-1. Technical comparison of features
-2. Pricing and value analysis
-3. Best use cases for each
-Or would you like me to choose the most engaging angle?"
+═══════════════════════════════════════════════════════════════
+MEMORY CONTEXT
+═══════════════════════════════════════════════════════════════
 
-CRITICAL RULES:
-- Never fake delegation - only use tools you actually have
-- Don't delegate trivial tasks you can answer directly
-- Review all worker outputs before presenting
-- Be honest about limitations
-- Maintain natural conversation flow
-- Think deeply (using thinking budget) but respond conversationally
+{memoryContext}
 
-Now, engage with the user's request thoughtfully and strategically.`;
+Now respond to the user's message with appropriate action.`;
 
 // =============================================================
-// Admin Tool Definition
+// Delegation Tool Definition
 // =============================================================
 
 const DELEGATE_TOOL = {
   name: 'delegate_to_worker',
-  description: 'Delegate a specialized task to an expert worker agent',
+  description: `Delegate a task to a specialized worker agent. Use this when a task requires focused expertise (research, writing, coding, analysis). The worker will execute independently and return results.`,
   parameters: {
     type: 'object',
     properties: {
       workerType: {
         type: 'string',
-        enum: [
-          'deep_search',
-          'data_analyst',
-          'content_writer',
-          'code_developer',
-          'report_generator',
-          'seo_specialist',
-          'editor',
-          'synthesizer',
-        ],
+        enum: ['deep_search', 'data_analyst', 'content_writer', 'code_developer', 'report_generator', 'seo_specialist', 'editor', 'synthesizer'],
         description: 'The type of specialist worker to use',
       },
       objective: {
         type: 'string',
-        description: 'Clear, specific description of what the worker should accomplish',
+        description: 'Clear, specific goal for the worker (what to accomplish)',
+      },
+      instructions: {
+        type: 'string',
+        description: 'Detailed step-by-step instructions for the worker',
       },
       context: {
         type: 'string',
-        description: 'Relevant background information and requirements',
+        description: 'Relevant background information the worker needs',
       },
       constraints: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Specific limitations or requirements',
+        description: 'Any limitations, requirements, or boundaries',
       },
-      expectedOutput: {
-        type: 'object',
-        properties: {
-          format: {
-            type: 'string',
-            enum: ['markdown', 'json', 'code', 'structured_text'],
-            description: 'Expected output format',
-          },
-          structure: {
-            type: 'string',
-            description: 'Optional: specific structure guidance for the output',
-          },
-        },
-        required: ['format'],
+      expectedFormat: {
+        type: 'string',
+        enum: ['markdown', 'json', 'code', 'list', 'report'],
+        description: 'Expected output format',
+      },
+      qualityCriteria: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Criteria for evaluating output quality',
       },
     },
-    required: ['workerType', 'objective', 'context', 'expectedOutput'],
+    required: ['workerType', 'objective', 'instructions'],
   },
 };
 
 // =============================================================
-// Admin Agent Class
+// Admin Agent Class (FIXED)
 // =============================================================
+
+export interface AdminCallbacks {
+  onChunk?: (chunk: string) => void;
+  onStatus?: (message: string) => void;
+  onWorkerProgress?: (event: WSOutgoingMessage) => void;
+  onArtifact?: (artifact: Artifact) => void;
+}
 
 export class AdminAgent {
   private gemini: GeminiClient;
   private workerExecutor: WorkerExecutor;
-  private config: AdminConfig;
-  private conversationTurn: number = 0;
+  private maxDelegations = 5;
 
-  // Active artifacts (worker results)
-  private artifacts: Map<string, WorkerResultEnvelope> = new Map();
-
-  constructor(gemini: GeminiClient, config: Partial<AdminConfig> = {}) {
+  constructor(gemini: GeminiClient) {
     this.gemini = gemini;
     this.workerExecutor = new WorkerExecutor(gemini);
-    this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  // =============================================================
-  // Main Execution Method
-  // =============================================================
+  // -----------------------------------------------------------
+  // Main Processing Method (FIXED - now passes state to workers)
+  // -----------------------------------------------------------
 
-  async processUserMessage(
+  async process(
     userMessage: string,
     conversationHistory: Message[],
-    memoryContext: string,
     state: AgentState,
-    callbacks: {
-      onChunk?: (chunk: string) => void;
-      onStatus?: (message: string) => void;
-      onWorkerProgress?: (worker: string, message: string) => void;
-    } = {}
-  ): Promise<string> {
-    this.conversationTurn++;
+    callbacks: AdminCallbacks = {}
+  ): Promise<{
+    response: string;
+    artifacts: Artifact[];
+    projectState?: ProjectState;
+  }> {
+    callbacks.onStatus?.('Thinking...');
 
-    if (this.conversationTurn > this.config.maxConversationTurns) {
-      return "I've reached the maximum number of conversation turns. Let's start a fresh session to continue.";
-    }
-
-    callbacks.onStatus?.('Admin reasoning...');
-
-    // Build system prompt with worker list
-    const workerList = WorkerExecutor.getAvailableWorkers()
-      .map(w => `  • ${w.type}: ${w.description}`)
-      .join('\n');
+    // Build system prompt with context
+    const systemPrompt = this.buildSystemPrompt(state);
     
-    const systemPrompt = ADMIN_SYSTEM_PROMPT
-      .replace('{workerList}', workerList)
-      + (memoryContext ? `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📚 RELEVANT CONTEXT FROM MEMORY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Format conversation for LLM
+    const messages = this.formatMessages(conversationHistory, systemPrompt, userMessage);
 
-${memoryContext}
+    // Track artifacts from this turn
+    const artifacts: Artifact[] = [];
+    let delegationCount = 0;
+    let fullResponse = '';
 
-Use this context to inform your responses and decisions.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━` : '');
+    // Main reasoning loop
+    while (delegationCount < this.maxDelegations) {
+      const response = await this.gemini.generateWithTools(
+        messages,
+        [DELEGATE_TOOL],
+        {
+          stream: true,
+          temperature: 0.7,
+          thinkingConfig: { thinkingBudget: 4096 },
+          useSearch: true,
+        },
+        (chunk) => {
+          fullResponse += chunk;
+          callbacks.onChunk?.(chunk);
+        }
+      );
 
-    // Format conversation history
-    const messages = this.formatConversationHistory(
-      conversationHistory,
-      systemPrompt,
-      userMessage
-    );
-
-    // Admin reasoning loop
-    let adminResponse = '';
-    let loopCount = 0;
-    const maxLoops = 5; // Prevent infinite delegation loops
-
-    while (loopCount < maxLoops) {
-      loopCount++;
-
-      try {
-        // Call Admin LLM with tool support
-        const response = await this.gemini.generateWithTools(
-          messages,
-          [DELEGATE_TOOL],
-          {
-            stream: false,
-            thinkingConfig: { thinkingBudget: this.config.thinkingBudget },
-            temperature: this.config.temperature,
-            useSearch: true,
-            useCodeExecution: false,
-          }
+      // Check for delegation tool call
+      if (response.toolCalls && response.toolCalls.length > 0) {
+        const delegateCall = response.toolCalls.find(
+          tc => tc.name === 'delegate_to_worker'
         );
 
-        adminResponse = response.text || '';
+        if (delegateCall) {
+          delegationCount++;
+          callbacks.onStatus?.(`Delegating to ${delegateCall.args.workerType}...`);
 
-        // Check if Admin wants to delegate to workers
-        if (response.toolCalls && response.toolCalls.length > 0) {
-          // Execute worker delegations
-          for (const toolCall of response.toolCalls) {
-            if (toolCall.name === 'delegate_to_worker') {
-              const workerResult = await this.executeWorkerDelegation(
-                toolCall.args,
-                callbacks
-              );
+          // ✅ FIX: Execute worker WITH state
+          const workerResult = await this.executeWorker(
+            delegateCall.args,
+            state, // Pass state!
+            callbacks
+          );
 
-              // Store artifact
-              this.artifacts.set(workerResult.taskId, workerResult);
-
-              // Add worker result to conversation
-              const resultSummary = workerResult.success
-                ? `Worker completed successfully:\n\n${workerResult.output}`
-                : `Worker failed: ${workerResult.error}`;
-
-              messages.push({
-                role: 'assistant',
-                content: `${adminResponse}\n[Delegating to ${toolCall.args.workerType}]`,
-              });
-              messages.push({
-                role: 'user',
-                content: `[Worker Result]\n${resultSummary}`,
-              });
-
-              // Continue Admin reasoning with worker results
-              break;
-            }
+          // Collect artifacts
+          if (workerResult.artifacts) {
+            artifacts.push(...workerResult.artifacts);
+            workerResult.artifacts.forEach(a => callbacks.onArtifact?.(a));
           }
 
-          // Continue loop to let Admin process worker results
-          adminResponse = '';
+          // Add worker result to conversation and continue
+          messages.push({
+            role: 'assistant',
+            content: fullResponse + `\n[Delegating to ${delegateCall.args.workerType}...]`,
+          });
+
+          messages.push({
+            role: 'user',
+            content: this.formatWorkerResult(workerResult),
+          });
+
+          // Reset for next iteration
+          fullResponse = '';
           continue;
         }
-
-        // No more tool calls - Admin has final response
-        break;
-      } catch (error) {
-        console.error('[AdminAgent] Error:', error);
-        return `I encountered an error while processing your request: ${error}. Please try rephrasing or simplifying your request.`;
       }
+
+      // No delegation - we're done
+      break;
     }
 
-    if (loopCount >= maxLoops) {
-      return `${adminResponse}\n\n(Note: I've reached the delegation limit for this turn. If you need more work done, please send another message.)`;
+    // Handle max delegations reached
+    if (delegationCount >= this.maxDelegations && fullResponse === '') {
+      fullResponse = "I've completed multiple steps on this task. Let me summarize what we've accomplished and discuss next steps.";
     }
 
-    // Stream final response if callback provided
-    if (callbacks.onChunk && adminResponse) {
-      callbacks.onChunk(adminResponse);
-    }
-
-    return adminResponse;
+    return {
+      response: fullResponse,
+      artifacts,
+      projectState: state.currentProject,
+    };
   }
 
-  // =============================================================
-  // Worker Delegation
-  // =============================================================
+  // -----------------------------------------------------------
+  // Worker Execution (FIXED - passes state)
+  // -----------------------------------------------------------
 
-  private async executeWorkerDelegation(
+  private async executeWorker(
     args: any,
-    callbacks: {
-      onStatus?: (message: string) => void;
-      onWorkerProgress?: (worker: string, message: string) => void;
-    }
-  ): Promise<WorkerResultEnvelope> {
-    const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    const envelope: WorkerTaskEnvelope = {
-      taskId,
+    state: AgentState, // ✅ FIX: Now receives state
+    callbacks: AdminCallbacks
+  ): Promise<TaskResult> {
+    const envelope: TaskEnvelope = {
+      taskId: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       workerType: args.workerType as WorkerType,
-      objective: args.objective || '',
+      objective: args.objective,
       context: args.context || '',
+      instructions: args.instructions,
       constraints: args.constraints || [],
-      expectedOutput: args.expectedOutput || { format: 'markdown' },
-      qualityCriteria: args.qualityCriteria || [],
+      expectedOutput: {
+        format: args.expectedFormat || 'markdown',
+        structure: args.structure,
+      },
+      qualityCriteria: args.qualityCriteria || ['accurate', 'complete', 'well-structured'],
     };
 
-    callbacks.onStatus?.(`Delegating to ${args.workerType}...`);
+    // Create progress callback for worker
+    const workerProgress: WorkerProgressCallback = (event) => {
+      callbacks.onWorkerProgress?.({
+        type: event.type === 'started' ? 'worker_started' :
+              event.type === 'completed' ? 'worker_completed' : 'worker_progress',
+        message: event.message,
+        worker: args.workerType,
+        taskId: envelope.taskId,
+        progress: event.turn && event.maxTurns 
+          ? Math.round((event.turn / event.maxTurns) * 100)
+          : undefined,
+      });
+    };
 
-    const result = await this.workerExecutor.execute(
-      envelope,
-      (msg) => callbacks.onWorkerProgress?.(args.workerType, msg)
-    );
-
-    callbacks.onStatus?.(`${args.workerType} completed`);
-
-    return result;
+    // ✅ FIX: Pass state to executor
+    return await this.workerExecutor.execute(envelope, state, workerProgress);
   }
 
-  // =============================================================
-  // Conversation History Formatting
-  // =============================================================
+  // -----------------------------------------------------------
+  // Prompt Building
+  // -----------------------------------------------------------
 
-  private formatConversationHistory(
+  private buildSystemPrompt(state: AgentState): string {
+    // Build worker list
+    const workers = workerRegistry.getAvailableWorkers();
+    const workerList = workers
+      .map(w => `• ${w.name} (${w.type}): ${w.description}`)
+      .join('\n');
+
+    // Build memory context
+    const memoryContext = state.context.memoryContext || 'No previous context available.';
+
+    // Build project context if active
+    let projectContext = '';
+    if (state.currentProject) {
+      const p = state.currentProject;
+      projectContext = `
+
+ACTIVE PROJECT: ${p.objective}
+Status: ${p.status}
+Phase: ${p.currentPhase || 'Not specified'}
+Artifacts created: ${p.artifacts.length}
+`;
+    }
+
+    return ADMIN_SYSTEM_PROMPT
+      .replace('{workerList}', workerList)
+      .replace('{memoryContext}', memoryContext + projectContext);
+  }
+
+  private formatMessages(
     history: Message[],
     systemPrompt: string,
-    currentUserMessage: string
+    currentMessage: string
   ): Array<{ role: string; content: string }> {
-    const formatted: Array<{ role: string; content: string }> = [
+    const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
     ];
 
-    // Add conversation history
-    for (const msg of history) {
+    // Add conversation history (limited to recent context)
+    const recentHistory = history.slice(-20);
+    for (const msg of recentHistory) {
       const content = msg.parts
-        ?.map(p => (typeof p === 'string' ? p : p.text || ''))
+        ?.map(p => p.text || '')
+        .filter(Boolean)
         .join('\n') || msg.content || '';
 
-      formatted.push({
-        role: msg.role === 'model' ? 'assistant' : 'user',
-        content,
-      });
+      if (content.trim()) {
+        messages.push({
+          role: msg.role === 'model' ? 'assistant' : 'user',
+          content,
+        });
+      }
     }
 
     // Add current message
-    formatted.push({ role: 'user', content: currentUserMessage });
+    messages.push({ role: 'user', content: currentMessage });
 
-    return formatted;
+    return messages;
   }
 
-  // =============================================================
-  // Status Methods
-  // =============================================================
+  private formatWorkerResult(result: TaskResult): string {
+    if (result.success) {
+      return `
+═══════════════════════════════════════════════════════════════
+WORKER RESULT: ${result.workerType}
+═══════════════════════════════════════════════════════════════
 
-  getArtifacts(): Map<string, WorkerResultEnvelope> {
-    return this.artifacts;
+STATUS: ✅ Success (Confidence: ${Math.round(result.confidence * 100)}%)
+SUMMARY: ${result.summary}
+
+OUTPUT:
+${result.output}
+
+${result.suggestions?.length ? `SUGGESTIONS: ${result.suggestions.join(', ')}` : ''}
+═══════════════════════════════════════════════════════════════
+
+Now integrate this result and respond to the user. You may:
+- Present the results with your analysis
+- Delegate another task if more work is needed
+- Ask the user for feedback on the results`;
+    } else {
+      return `
+═══════════════════════════════════════════════════════════════
+WORKER RESULT: ${result.workerType}
+═══════════════════════════════════════════════════════════════
+
+STATUS: ❌ Failed
+ERROR: ${result.error}
+
+═══════════════════════════════════════════════════════════════
+
+The worker encountered an issue. You may:
+- Try a different approach
+- Delegate to a different worker
+- Ask the user for more information
+- Handle this directly if possible`;
+    }
   }
 
-  clearArtifacts(): void {
-    this.artifacts.clear();
+  // -----------------------------------------------------------
+  // Direct Response (Simple Queries)
+  // -----------------------------------------------------------
+
+  async respondDirect(
+    userMessage: string,
+    conversationHistory: Message[],
+    state: AgentState,
+    onChunk?: (chunk: string) => void
+  ): Promise<string> {
+    const systemPrompt = this.buildSystemPrompt(state);
+    const messages = this.formatMessages(conversationHistory, systemPrompt, userMessage);
+
+    let fullResponse = '';
+    
+    await this.gemini.generateWithTools(
+      messages,
+      [], // No tools for direct response
+      {
+        stream: true,
+        temperature: 0.7,
+        thinkingConfig: { thinkingBudget: 1024 },
+        useSearch: true,
+      },
+      (chunk) => {
+        fullResponse += chunk;
+        onChunk?.(chunk);
+      }
+    );
+
+    return fullResponse;
   }
 
-  resetTurnCount(): void {
-    this.conversationTurn = 0;
-  }
+  // -----------------------------------------------------------
+  // Complexity Assessment
+  // -----------------------------------------------------------
 
-  getMetrics(): {
-    conversationTurn: number;
-    artifactCount: number;
-  } {
-    return {
-      conversationTurn: this.conversationTurn,
-      artifactCount: this.artifacts.size,
-    };
+  async assessComplexity(
+    userMessage: string,
+    conversationHistory: Message[]
+  ): Promise<{
+    needsWorker: boolean;
+    suggestedWorker?: WorkerType;
+    reason: string;
+  }> {
+    const assessPrompt = `Analyze this user request and determine if it needs specialized worker assistance.
+
+USER REQUEST: "${userMessage}"
+
+RECENT CONTEXT: ${conversationHistory.slice(-3).map(m => 
+  `${m.role}: ${m.parts?.[0]?.text || m.content || ''}`
+).join('\n')}
+
+CRITERIA FOR WORKER DELEGATION:
+- Research requiring multiple sources → deep_search
+- Data analysis or statistics → data_analyst
+- Content creation (articles, docs) → content_writer
+- Code implementation → code_developer
+- Professional documents → report_generator
+- SEO work → seo_specialist
+- Content editing → editor
+
+Respond with JSON only:
+{
+  "needsWorker": boolean,
+  "suggestedWorker": "worker_type" or null,
+  "reason": "brief explanation"
+}`;
+
+    try {
+      const response = await this.gemini.generateWithTools(
+        [{ role: 'user', content: assessPrompt }],
+        [],
+        { stream: false, temperature: 0.2 }
+      );
+
+      const match = response.text.match(/\{[\s\S]*\}/);
+      if (match) {
+        return JSON.parse(match[0]);
+      }
+    } catch (e) {
+      console.warn('[Admin] Complexity assessment failed:', e);
+    }
+
+    return { needsWorker: false, reason: 'Assessment failed, defaulting to direct' };
   }
 }
+
+export default AdminAgent;
