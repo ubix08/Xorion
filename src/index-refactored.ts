@@ -1,7 +1,7 @@
 // src/index-refactored.ts
 // Worker entry point with Admin-Worker architecture
 
-import { AutonomousAgent } from './durable-agent-refactored';
+import { AutonomousAgent } from './durable-agent';
 import type { Env } from './types';
 import { SessionManager } from './session/session-manager';
 
