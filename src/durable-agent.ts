@@ -238,3 +238,4 @@ export class OrionAgent extends DurableObject {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   }
 }
+export default OrionAgent;
