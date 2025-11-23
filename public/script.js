@@ -1,6 +1,6 @@
-/*  Orion-Chat — Enhanced with orchestration support for multi-step tasks  */
+/*  Orion Multi-Agent Frontend — Enhanced for Refactored Architecture  */
 
-/* ---------- 0. Tiny helpers ---------- */
+/* ========== 0. Helpers ========== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const escapeHtml = (text) => {
   const d = document.createElement('div');
@@ -8,7 +8,7 @@ const escapeHtml = (text) => {
   return d.innerHTML;
 };
 
-/* ---------- 1. Wait for libs ---------- */
+/* ========== 1. Wait for libs ========== */
 let libsReady = false;
 function waitLibs() {
   return new Promise((res) => {
@@ -22,7 +22,7 @@ function waitLibs() {
   });
 }
 
-/* ---------- 2. DOM cache ---------- */
+/* ========== 2. DOM cache ========== */
 const $ = (id) => document.getElementById(id);
 const chatContainer = $('messages-area');
 const chatMessages = $('messages-wrapper');
@@ -37,8 +37,12 @@ const sidebar = $('sidebar');
 const menuBtn = $('menu-btn');
 const overlay = $('overlay');
 const userInfo = $('user-info');
+const workerActivity = $('worker-activity');
+const workerActivityText = $('worker-activity-text');
+const artifactsPanel = $('artifacts-panel');
+const artifactsList = $('artifacts-list');
 
-/* ---------- 3. State with session and task management ---------- */
+/* ========== 3. State ========== */
 let ws = null,
   isConnecting = false,
   reconnectAttempts = 0;
@@ -49,29 +53,31 @@ let pendingFiles = [],
 let isNewSession = false;
 const MAX_RECONNECT_DELAY = 30000;
 
-// Session management state
+// Session management
 let currentSessionId = null;
 let sessions = [];
 
-// Task orchestration state
-let currentTaskBoard = null;
-let taskProgressEl = null;
+// Worker tracking
+let activeWorker = null;
+let workerStartTime = null;
 
-/* ---------- 4. Init ---------- */
+// Artifacts
+let artifacts = [];
+let currentArtifactContent = null;
+
+/* ========== 4. Init ========== */
 window.addEventListener('DOMContentLoaded', async () => {
   await waitLibs();
   configureMarked();
 
-  // Initialize session management
   await initializeSession();
-
   setupFileUpload();
   setupInputHandlers();
   setupSidebarToggle();
   checkMobileView();
 
-  // Load sessions list
   await loadSessionsList();
+  await loadArtifacts();
 });
 
 window.addEventListener('resize', checkMobileView);
@@ -79,13 +85,11 @@ window.addEventListener('beforeunload', () => {
   if (ws) try { ws.close(); } catch {}
 });
 
-/* ---------- 5. Session Management ---------- */
+/* ========== 5. Session Management ========== */
 async function initializeSession() {
-  // Try to get session ID from localStorage
   const storedSessionId = localStorage.getItem('currentSessionId');
 
   if (storedSessionId) {
-    // Verify session still exists
     try {
       const response = await fetch(`/api/sessions/${storedSessionId}`);
       if (response.ok) {
@@ -101,7 +105,6 @@ async function initializeSession() {
     }
   }
 
-  // Create new session
   await createNewSession();
 }
 
@@ -126,6 +129,7 @@ async function createNewSession(title = 'New Session') {
     console.log('Created new session:', currentSessionId);
 
     isNewSession = true;
+    artifacts = [];
     updateUserInfo();
     connectWebSocket();
     await loadSessionsList();
@@ -153,29 +157,39 @@ async function loadSessionsList() {
 }
 
 function renderSessionsList() {
-  const container = document.querySelector('nav ul');
+  const container = $('sessions-list');
   if (!container) return;
 
   container.innerHTML = '';
 
   sessions.forEach((session) => {
     const id = session.sessionId || session.id;
-    const title = session.title || session.name || id;
+    const title = session.title || session.name || 'New Session';
+    const messageCount = session.messageCount || 0;
+    
     const li = document.createElement('li');
     li.className = `p-2 text-sm rounded-lg hover:bg-gray-800 transition-colors cursor-pointer truncate ${
       id === currentSessionId ? 'bg-gray-800 text-white' : 'text-gray-400'
     }`;
+    
     li.innerHTML = `
       <div class="flex items-center gap-2">
-        <span class="truncate flex-1">${title}</span>
-        <button onclick="deleteSession('${id}')" class="text-red-400 hover:text-red-300">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <span class="truncate flex-1">${escapeHtml(title)}</span>
+        <span class="text-xs text-gray-500">${messageCount}</span>
+        <button onclick="deleteSession('${id}')" class="text-red-400 hover:text-red-300 p-1">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
           </svg>
         </button>
       </div>
     `;
-    li.addEventListener('click', () => switchToSession(id));
+    
+    li.addEventListener('click', (e) => {
+      if (!e.target.closest('button')) {
+        switchToSession(id);
+      }
+    });
+    
     container.appendChild(li);
   });
 }
@@ -191,14 +205,16 @@ async function switchToSession(sessionId) {
   if (chatMessages) chatMessages.innerHTML = '';
   conversationStarted = false;
   welcomeScreen?.classList.remove('hidden');
-  currentTaskBoard = null;
-  taskProgressEl = null;
+  artifacts = [];
+  activeWorker = null;
+  hideWorkerActivity();
 
   currentSessionId = sessionId;
   localStorage.setItem('currentSessionId', sessionId);
 
   updateUserInfo();
   await loadChatHistory();
+  await loadArtifacts();
   connectWebSocket();
 
   if (window.innerWidth <= 768 && sidebar && overlay) {
@@ -228,16 +244,16 @@ window.deleteSession = async function (id) {
 };
 
 async function generateSessionTitle() {
+  if (!currentSessionId) return;
+  
   try {
-    const response = await fetch(`/api/memory/summarize?session_id=${encodeURIComponent(currentSessionId)}`, {
-      method: 'POST',
-    });
-    if (!response.ok) throw new Error('Failed to summarize session');
-
-    const data = await response.json();
-    const title = data.summary.slice(0, 50) + (data.summary.length > 50 ? '...' : '');
-
-    await updateSessionTitle(title);
+    // Use first user message as title
+    const messages = chatMessages?.querySelectorAll('.message-content') || [];
+    if (messages.length > 0) {
+      const firstMsg = messages[0].textContent.slice(0, 50);
+      const title = firstMsg + (firstMsg.length >= 50 ? '...' : '');
+      await updateSessionTitle(title);
+    }
   } catch (e) {
     console.error('Failed to generate title:', e);
   }
@@ -245,14 +261,15 @@ async function generateSessionTitle() {
 
 async function updateSessionTitle(title) {
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}`, {
+    const response = await fetch(`/api/sessions/${currentSessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title }),
     });
-    if (!response.ok) throw new Error('Failed to update title');
-
-    await loadSessionsList();
+    
+    if (response.ok) {
+      await loadSessionsList();
+    }
   } catch (e) {
     console.error('Failed to update title:', e);
   }
@@ -260,11 +277,102 @@ async function updateSessionTitle(title) {
 
 function updateUserInfo() {
   if (userInfo && currentSessionId) {
-    userInfo.textContent = `Session: ${currentSessionId.slice(0, 8)}...`;
+    userInfo.innerHTML = `
+      <div class="text-xs">Session: <span class="text-teal-400">${currentSessionId.slice(0, 8)}...</span></div>
+      <div class="text-xs text-gray-500 mt-1">Artifacts: ${artifacts.length}</div>
+    `;
   }
 }
 
-/* ---------- 6. Marked ---------- */
+/* ========== 6. Artifacts Management ========== */
+async function loadArtifacts() {
+  if (!currentSessionId) return;
+
+  try {
+    const response = await fetch(`/api/artifacts?session_id=${encodeURIComponent(currentSessionId)}`);
+    if (!response.ok) return;
+
+    const data = await response.json();
+    artifacts = data.artifacts || [];
+    
+    renderArtifacts();
+    updateUserInfo();
+  } catch (e) {
+    console.error('Failed to load artifacts:', e);
+  }
+}
+
+function renderArtifacts() {
+  if (!artifactsList) return;
+
+  if (artifacts.length === 0) {
+    artifactsPanel?.classList.add('hidden');
+    return;
+  }
+
+  artifactsPanel?.classList.remove('hidden');
+  artifactsList.innerHTML = '';
+
+  artifacts.forEach((artifact) => {
+    const item = document.createElement('div');
+    item.className = 'p-2 bg-white/5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer border border-white/10';
+    
+    const typeIcons = {
+      research: '🔍',
+      analysis: '📊',
+      content: '📝',
+      code: '💻',
+      report: '📄',
+      data: '📈',
+    };
+    
+    const icon = typeIcons[artifact.type] || '📎';
+    
+    item.innerHTML = `
+      <div class="flex items-center gap-2">
+        <span class="text-lg">${icon}</span>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs font-medium text-white truncate">${escapeHtml(artifact.title)}</div>
+          <div class="text-xs text-gray-500">${artifact.type}</div>
+        </div>
+      </div>
+    `;
+    
+    item.addEventListener('click', () => viewArtifact(artifact));
+    artifactsList.appendChild(item);
+  });
+}
+
+function viewArtifact(artifact) {
+  const modal = $('artifact-modal');
+  const titleEl = $('artifact-modal-title');
+  const contentEl = $('artifact-modal-content');
+  
+  if (!modal || !titleEl || !contentEl) return;
+
+  titleEl.textContent = artifact.title;
+  contentEl.innerHTML = marked.parse(artifact.content);
+  contentEl.querySelectorAll('pre code').forEach((b) => hljs.highlightElement(b));
+  
+  currentArtifactContent = artifact.content;
+  modal.classList.remove('hidden');
+}
+
+window.closeArtifactModal = function() {
+  const modal = $('artifact-modal');
+  if (modal) modal.classList.add('hidden');
+  currentArtifactContent = null;
+};
+
+window.copyArtifactContent = function() {
+  if (!currentArtifactContent) return;
+  
+  navigator.clipboard.writeText(currentArtifactContent)
+    .then(() => addToast('Content copied!', 'success'))
+    .catch(() => addToast('Failed to copy', 'error'));
+};
+
+/* ========== 7. Marked Config ========== */
 function configureMarked() {
   marked.setOptions({
     breaks: true,
@@ -282,7 +390,7 @@ function configureMarked() {
   });
 }
 
-/* ---------- 7. WebSocket with session support ---------- */
+/* ========== 8. WebSocket ========== */
 async function connectWebSocket() {
   if (!currentSessionId) {
     console.error('Cannot connect WebSocket without session ID');
@@ -339,7 +447,7 @@ function scheduleReconnect() {
   }, delay);
 }
 
-/* ---------- 8. Mobile ---------- */
+/* ========== 9. Mobile ========== */
 function checkMobileView() {
   const mobile = window.innerWidth <= 768;
   if (mobile && sidebar && overlay) {
@@ -360,7 +468,7 @@ function setupSidebarToggle() {
   });
 }
 
-/* ---------- 9. File upload ---------- */
+/* ========== 10. File upload ========== */
 function setupFileUpload() {
   const attachBtn = $('attach-file-button');
   if (attachBtn) {
@@ -374,7 +482,7 @@ function setupFileUpload() {
     const files = Array.from(e.target.files || []);
     for (const file of files) {
       if (file.size > 20 * 1024 * 1024) {
-        addToast(`${file.name} too large`, 'error');
+        addToast(`${file.name} too large (max 20MB)`, 'error');
         continue;
       }
       try {
@@ -388,7 +496,7 @@ function setupFileUpload() {
         addFileChip(file);
         addToast(`Added ${file.name}`, 'success');
       } catch {
-        addToast(`Failed ${file.name}`, 'error');
+        addToast(`Failed to add ${file.name}`, 'error');
       }
     }
     fileInput.value = '';
@@ -448,7 +556,7 @@ function getFileIcon(mime, name) {
   return '📎';
 }
 
-/* ---------- 10. Input ---------- */
+/* ========== 11. Input ========== */
 function setupInputHandlers() {
   const form = $('chat-form');
 
@@ -483,7 +591,7 @@ function setupInputHandlers() {
   }
 }
 
-/* ---------- 11. Send with session ID ---------- */
+/* ========== 12. Send ========== */
 async function sendMessage() {
   const msg = (userInput?.value || '').trim();
   if ((msg === '' && pendingFiles.length === 0) || isProcessing) return;
@@ -527,13 +635,13 @@ async function sendMessage() {
   }
 }
 
-/* ---------- 12. Server messages with orchestration support ---------- */
+/* ========== 13. Server messages ========== */
 function handleServerMessage(d) {
   console.log('Server message:', d.type, d);
 
   switch (d.type) {
     case 'status':
-      updateTypingIndicator(d.message);
+      updateTypingIndicator(d.message || 'Processing...');
       break;
 
     case 'chunk':
@@ -545,47 +653,28 @@ function handleServerMessage(d) {
       scrollToBottom(true);
       break;
 
-    case 'tool_use':
-      if (d.tools?.length) showToolUse(d.tools);
+    case 'worker_started':
+      handleWorkerStarted(d);
       break;
 
-    // ===== NEW: Orchestration messages =====
-    case 'plan_created':
-      handlePlanCreated(d);
+    case 'worker_progress':
+      handleWorkerProgress(d);
       break;
 
-    case 'task_progress':
-      handleTaskProgress(d);
+    case 'worker_completed':
+      handleWorkerCompleted(d);
       break;
 
-    case 'task_completed':
-      handleTaskCompleted(d);
+    case 'artifact':
+      handleArtifact(d);
       break;
 
-    case 'task_failed':
-      handleTaskFailed(d);
-      break;
-
-    case 'checkpoint':
-      handleCheckpoint(d);
-      break;
-
-    case 'task_abandoned':
-      handleTaskAbandoned();
-      break;
-
-    case 'session_context':
-      handleSessionContext(d.context);
-      break;
-    // ===== END NEW =====
-
-    case 'done':
     case 'complete':
       hideTypingIndicator();
+      hideWorkerActivity();
       if (currentMessageEl) finalizeMessage(currentMessageEl);
       currentMessageEl = null;
-      taskProgressEl = null;
-      currentTaskBoard = null;
+      activeWorker = null;
       isProcessing = false;
       enableInput(false);
       scrollToBottom(true);
@@ -597,15 +686,12 @@ function handleServerMessage(d) {
       }
       break;
 
-    case 'continuing':
-      updateTypingIndicator(d.message || 'Continuing...');
-      break;
-
     case 'error':
       hideTypingIndicator();
-      addToast(`Error: ${d.error}`, 'error');
+      hideWorkerActivity();
+      addToast(`Error: ${d.message || d.error || 'Unknown error'}`, 'error');
       currentMessageEl = null;
-      taskProgressEl = null;
+      activeWorker = null;
       isProcessing = false;
       enableInput(true);
       break;
@@ -616,209 +702,74 @@ function handleServerMessage(d) {
   }
 }
 
-/* ---------- 13. Task orchestration handlers ---------- */
-function handlePlanCreated(data) {
-  hideWelcome();
-  
-  currentTaskBoard = {
-    taskCount: data.taskCount || 0,
-    checkpoints: data.checkpoints || 0,
-    completedTasks: 0,
-  };
-
-  // Create a plan summary message
-  const planEl = createMessageElement('assistant');
-  const content = planEl.querySelector('.message-content');
-  
-  content.innerHTML = `
-    <div class="p-4 bg-blue-900/30 border border-blue-700/50 rounded-lg">
-      <div class="flex items-center gap-2 mb-2">
-        <svg class="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-        </svg>
-        <h4 class="font-semibold text-blue-400">Plan Created</h4>
-      </div>
-      <p class="text-sm text-gray-300">${data.summary || `Breaking down your request into ${data.taskCount} tasks with ${data.checkpoints} checkpoints.`}</p>
-      <div class="mt-3 flex gap-4 text-xs text-gray-400">
-        <span>📋 ${data.taskCount} tasks</span>
-        <span>🎯 ${data.checkpoints} checkpoints</span>
-      </div>
-    </div>
-  `;
-
-  // Create task progress container
-  taskProgressEl = document.createElement('div');
-  taskProgressEl.className = 'mt-4 space-y-2';
-  content.appendChild(taskProgressEl);
-
-  scrollToBottom(true);
+/* ========== 14. Worker Activity ========== */
+function handleWorkerStarted(data) {
+  activeWorker = data.worker;
+  workerStartTime = Date.now();
+  showWorkerActivity(`${data.worker} starting...`);
+  updateTypingIndicator(`Delegating to ${data.worker}...`);
 }
 
-function handleTaskProgress(data) {
-  if (!taskProgressEl) {
-    // Create progress container if it doesn't exist
-    if (!currentMessageEl) {
-      hideWelcome();
-      currentMessageEl = createMessageElement('assistant');
-    }
-    const content = currentMessageEl.querySelector('.message-content');
-    taskProgressEl = document.createElement('div');
-    taskProgressEl.className = 'mt-4 space-y-2';
-    content.appendChild(taskProgressEl);
+function handleWorkerProgress(data) {
+  if (data.progress !== undefined) {
+    showWorkerActivity(`${data.worker} - ${data.progress}%`);
+  } else if (data.message) {
+    showWorkerActivity(data.message);
   }
-
-  // Update or create task progress item
-  let taskItem = taskProgressEl.querySelector(`[data-task-id="${data.taskId}"]`);
-  
-  if (!taskItem) {
-    taskItem = document.createElement('div');
-    taskItem.className = 'p-3 bg-white/5 rounded border border-white/10';
-    taskItem.dataset.taskId = data.taskId;
-    taskProgressEl.appendChild(taskItem);
-  }
-
-  taskItem.innerHTML = `
-    <div class="flex items-center gap-2">
-      <div class="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></div>
-      <span class="text-sm text-gray-300">${escapeHtml(data.message)}</span>
-    </div>
-  `;
-
-  scrollToBottom(true);
+  updateTypingIndicator(data.message || 'Worker processing...');
 }
 
-function handleTaskCompleted(data) {
-  if (!taskProgressEl) return;
-
-  currentTaskBoard.completedTasks++;
-
-  const taskItem = taskProgressEl.querySelector(`[data-task-id="${data.taskId}"]`);
+function handleWorkerCompleted(data) {
+  const duration = workerStartTime ? ((Date.now() - workerStartTime) / 1000).toFixed(1) : '?';
+  showWorkerActivity(`${data.worker} completed (${duration}s)`);
   
-  if (taskItem) {
-    taskItem.innerHTML = `
-      <div class="flex items-center gap-2">
-        <div class="w-2 h-2 bg-teal-500 rounded-full"></div>
-        <span class="text-sm text-gray-300">✓ ${escapeHtml(data.taskName || 'Task completed')}</span>
-      </div>
-      ${data.preview ? `<p class="text-xs text-gray-400 mt-1 ml-4">${escapeHtml(data.preview)}</p>` : ''}
-    `;
-  }
-
-  updateTypingIndicator(`Progress: ${currentTaskBoard.completedTasks}/${currentTaskBoard.taskCount} tasks completed`);
-  scrollToBottom(true);
+  setTimeout(() => {
+    hideWorkerActivity();
+    activeWorker = null;
+    workerStartTime = null;
+  }, 2000);
 }
 
-function handleTaskFailed(data) {
-  if (!taskProgressEl) return;
-
-  const taskItem = taskProgressEl.querySelector(`[data-task-id="${data.taskId}"]`);
-  
-  if (taskItem) {
-    taskItem.innerHTML = `
-      <div class="flex items-center gap-2">
-        <div class="w-2 h-2 bg-red-500 rounded-full"></div>
-        <span class="text-sm text-red-400">✗ Task failed${data.willRetry ? ' (retrying...)' : ''}</span>
-      </div>
-      ${data.error ? `<p class="text-xs text-gray-400 mt-1 ml-4">${escapeHtml(data.error)}</p>` : ''}
-    `;
-  }
-
-  scrollToBottom(true);
+function showWorkerActivity(message) {
+  if (!workerActivity || !workerActivityText) return;
+  workerActivityText.textContent = message;
+  workerActivity.classList.remove('hidden');
 }
 
-function handleCheckpoint(data) {
-  hideTypingIndicator();
+function hideWorkerActivity() {
+  if (!workerActivity) return;
+  workerActivity.classList.add('hidden');
+}
+
+function handleArtifact(data) {
+  if (!data.artifact) return;
   
+  artifacts.push(data.artifact);
+  renderArtifacts();
+  updateUserInfo();
+  
+  // Show artifact notification in current message
   if (currentMessageEl) {
-    finalizeMessage(currentMessageEl);
-  }
-
-  // Create checkpoint message
-  const checkpointEl = createMessageElement('assistant');
-  const content = checkpointEl.querySelector('.message-content');
-  
-  content.innerHTML = `
-    <div class="p-4 bg-purple-900/30 border border-purple-700/50 rounded-lg">
-      <div class="flex items-center gap-2 mb-3">
-        <svg class="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+    const content = currentMessageEl.querySelector('.message-content');
+    if (content) {
+      const artifactNotice = document.createElement('div');
+      artifactNotice.className = 'mt-3 p-3 artifact-badge rounded-lg text-white text-sm flex items-center gap-2';
+      artifactNotice.innerHTML = `
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
-        <h4 class="font-semibold text-purple-400">Checkpoint Reached</h4>
-      </div>
-      <p class="text-sm text-gray-300 mb-4">${escapeHtml(data.message)}</p>
-      ${data.task ? `
-        <div class="mb-4 p-2 bg-white/5 rounded text-xs text-gray-400">
-          <strong>Current task:</strong> ${escapeHtml(data.task.name || 'Unknown')}
-        </div>
-      ` : ''}
-      <div class="flex gap-2">
-        <button onclick="respondToCheckpoint(true)" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 rounded-lg text-sm transition-colors">
-          ✓ Continue
-        </button>
-        <button onclick="respondToCheckpoint(false)" class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-sm transition-colors">
-          ✗ Stop
-        </button>
-      </div>
-    </div>
-  `;
-
-  currentMessageEl = null;
-  taskProgressEl = null;
-  isProcessing = false;
-  enableInput(true);
-  scrollToBottom(true);
-}
-
-window.respondToCheckpoint = function(approved) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    addToast('Connection lost', 'error');
-    return;
+        <span>Created: <strong>${escapeHtml(data.artifact.title)}</strong> (${data.artifact.type})</span>
+      `;
+      artifactNotice.style.cursor = 'pointer';
+      artifactNotice.addEventListener('click', () => viewArtifact(data.artifact));
+      content.appendChild(artifactNotice);
+    }
   }
-
-  const feedback = approved ? 'Continue with the plan' : 'Stop execution';
   
-  isProcessing = true;
-  disableInput();
-  showTypingIndicator(approved ? 'Continuing...' : 'Stopping...');
-
-  ws.send(JSON.stringify({
-    type: 'checkpoint_response',
-    feedback,
-    approved,
-  }));
-};
-
-function handleTaskAbandoned() {
-  hideTypingIndicator();
-  currentTaskBoard = null;
-  taskProgressEl = null;
-  isProcessing = false;
-  enableInput(true);
-  addToast('Task abandoned', 'info');
+  addToast(`Artifact created: ${data.artifact.type}`, 'success');
 }
 
-function handleSessionContext(context) {
-  console.log('Session context:', context);
-  
-  if (context.hasActiveBoard && context.suggestedAction === 'resume') {
-    // Show notification about pending tasks
-    addToast('You have an unfinished task. Type "continue" to resume or "stop" to abandon.', 'info');
-  }
-}
-
-function showToolUse(tools) {
-  if (!currentMessageEl) {
-    hideWelcome();
-    currentMessageEl = createMessageElement('assistant');
-  }
-  const div = document.createElement('div');
-  div.className = 'text-xs text-gray-400 mt-2 p-2 bg-white/5 rounded border border-white/10';
-  div.innerHTML = `🔧 Using: **${tools.join(', ')}**`;
-  currentMessageEl.querySelector('.message-content')?.appendChild(div);
-  scrollToBottom(true);
-}
-
-/* ---------- 14. Message DOM ---------- */
+/* ========== 15. Message DOM ========== */
 function createMessageElement(role) {
   const isUser = role === 'user';
   const wrap = document.createElement('div');
@@ -876,158 +827,13 @@ function addAssistantMessage(txt, scroll = true) {
   if (scroll) scrollToBottom(false);
 }
 
-/* ---------- 15. Typing ---------- */
+/* ========== 16. Typing ========== */
 function showTypingIndicator(msg = 'Thinking…') {
   if (!typingText || !typingIndicator) return;
-  typingText.innerHTML = `<div class="flex items-center gap-2"><span>${msg}</span></div>`;
+  typingText.innerHTML = `<div class="flex items-center gap-2"><span>${escapeHtml(msg)}</span></div>`;
   typingIndicator.classList.remove('hidden');
   scrollToBottom(true);
 }
 
 function updateTypingIndicator(msg) {
-  if (!typingText) return;
-  typingText.innerHTML = `<div class="flex items-center gap-2"><span>${msg}</span></div>`;
-}
-
-function hideTypingIndicator() {
-  typingIndicator?.classList.add('hidden');
-}
-
-/* ---------- 16. Input lock ---------- */
-function disableInput() {
-  if (userInput) userInput.disabled = true;
-  if (sendButton) sendButton.disabled = true;
-}
-
-function enableInput(focus = true) {
-  if (userInput) userInput.disabled = false;
-  if (sendButton) sendButton.disabled = false;
-  if (focus && userInput) userInput.focus();
-}
-
-/* ---------- 17. Scroll ---------- */
-function scrollToBottom(smooth = false) {
-  const container = $('messages-area');
-  if (container) {
-    container.scrollTo({
-      top: container.scrollHeight,
-      behavior: smooth ? 'smooth' : 'auto',
-    });
-  }
-}
-
-/* ---------- 18. Connection status ---------- */
-function updateConnectionStatus(txt, cls) {
-  const indicator = $('status-indicator');
-  const statusText = $('status-text');
-  const dot = indicator?.querySelector('.w-2.h-2');
-
-  if (dot) {
-    dot.className = `w-2 h-2 rounded-full ml-2 ${cls}`;
-  }
-
-  if (statusText) {
-    statusText.textContent = txt;
-    statusText.className =
-      cls === 'bg-teal-500' ? 'text-teal-400' : cls === 'bg-red-500' ? 'text-red-400' : 'text-gray-400';
-  }
-}
-
-/* ---------- 19. Toast ---------- */
-function addToast(msg, type = 'info') {
-  const colors = {
-    error: 'bg-red-600',
-    success: 'bg-teal-600',
-    info: 'bg-blue-600',
-  };
-
-  const t = document.createElement('div');
-  t.className = `fixed bottom-5 right-5 p-3 rounded-lg shadow-xl z-50 text-white text-sm transition transform translate-x-full opacity-0 ${colors[type] || colors.info}`;
-  t.textContent = msg;
-  document.body.appendChild(t);
-
-  setTimeout(() => t.classList.remove('translate-x-full', 'opacity-0'), 10);
-  setTimeout(() => {
-    t.classList.add('translate-x-full', 'opacity-0');
-    setTimeout(() => t.remove(), 300);
-  }, 3000);
-}
-
-/* ---------- 20. History with session ID ---------- */
-async function loadChatHistory() {
-  if (!currentSessionId) return;
-
-  try {
-    const response = await fetch(`/api/history?session_id=${encodeURIComponent(currentSessionId)}`);
-    if (!response.ok) return;
-
-    const data = await response.json();
-    if (data.messages?.length) {
-      hideWelcome();
-      data.messages.forEach((m) => {
-        const role = m.role === 'model' ? 'assistant' : 'user';
-        const text = (m.parts || []).filter((p) => p.text).map((p) => p.text).join('\n');
-        if (text) {
-          role === 'user' ? addUserMessage(text, false) : addAssistantMessage(text, false);
-        }
-      });
-      scrollToBottom(false);
-    }
-  } catch (e) {
-    console.error('history', e);
-  }
-}
-
-/* ---------- 21. Clear with session ID ---------- */
-window.clearChat = async function () {
-  if (!confirm('Start a new chat? This will create a fresh session.')) return;
-
-  try {
-    await createNewSession('New Chat');
-
-    if (chatMessages) chatMessages.innerHTML = '';
-    pendingFiles = [];
-    if (filePreview) filePreview.innerHTML = '';
-    conversationStarted = false;
-    currentTaskBoard = null;
-    taskProgressEl = null;
-
-    welcomeScreen?.classList.remove('hidden');
-
-    addToast('New chat started', 'success');
-  } catch (e) {
-    console.error('clear', e);
-    addToast('Failed to start new chat', 'error');
-  }
-};
-
-/* ---------- 22. Suggestions ---------- */
-window.useSuggestion = function (el) {
-  if (!el) return;
-  const txt = el.textContent
-    .trim()
-    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '')
-    .replace(/[^\w\s\?]/g, '')
-    .trim();
-  if (userInput) userInput.value = txt;
-  if (userInput) {
-    userInput.style.height = 'auto';
-    userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
-    userInput.focus();
-  }
-};
-
-/* ---------- 23. Welcome ---------- */
-function hideWelcome() {
-  if (!conversationStarted) {
-    welcomeScreen?.classList.add('hidden');
-    conversationStarted = true;
-  }
-}
-
-/* ---------- 24. Geo stub ---------- */
-window.getCurrentPosition = async () => ({
-  lat: 0,
-  lon: 0,
-  addr: 'Earth',
-});
+  if (!typing
