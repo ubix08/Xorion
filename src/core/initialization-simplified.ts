@@ -11,7 +11,7 @@
  * - Keep it simple
  */
 
-export class SimpleInit {
+export class Init {
   private initialized = false;
   private initPromise: Promise<void> | null = null;
 
@@ -72,6 +72,7 @@ export class SimpleInit {
     this.initPromise = null;
   }
 }
+export default Init;
 
 // =============================================================
 // USAGE IN DURABLE OBJECT
