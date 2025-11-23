@@ -7,7 +7,7 @@ import type { Env, Message } from './types';
 import { GeminiClient } from './gemini';
 import { AdminAgent } from './admin/admin-agent';
 import { UnifiedStorage } from './storage/d1-storage';
-import { SimplifiedMemoryManager } from './memory/memory-simplified';
+import { SimplifiedMemoryManager } from './memory/memory-manager';
 import { SimpleInit } from './core/initialization-simplified';
 
 // =============================================================
