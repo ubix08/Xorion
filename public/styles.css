@@ -1,155 +1,435 @@
-/* Suna-Lite Custom Styles */
+/* Orion Multi-Agent Custom Styles */
+
+/* ========== Base ========== */
 body {
-font-family: 'Inter', sans-serif;
-background-color: #171717;
+  font-family: 'Inter', sans-serif;
+  background-color: #171717;
 }
-/* Custom Scrollbar */
+
+/* ========== Custom Scrollbar ========== */
 .custom-scrollbar::-webkit-scrollbar {
-width: 8px;
+  width: 8px;
+  height: 8px;
 }
+
 .custom-scrollbar::-webkit-scrollbar-track {
-background: #171717;
+  background: #171717;
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb {
-background: #4A4A4A;
-border-radius: 4px;
-border: 2px solid #171717;
+  background: #4A4A4A;
+  border-radius: 4px;
+  border: 2px solid #171717;
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-background: #6c6c6c;
+  background: #6c6c6c;
 }
-/* Textarea No Resize */
+
+/* ========== Textarea ========== */
 textarea {
-resize: none;
+  resize: none;
 }
-/* Tools Popup Animation */
+
+/* ========== Tools Popup Animation ========== */
 .tools-popup {
-transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
+  transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
 }
-/* Bounce Animation for Typing Dots */
+
+/* ========== Bounce Animation for Typing Dots ========== */
 @keyframes bounce {
-0%, 100% {
-transform: translateY(0);
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
 }
-50% {
-transform: translateY(-8px);
-}
-}
+
 .animate-bounce {
-animation: bounce 1.4s infinite;
+  animation: bounce 1.4s infinite;
 }
-/* Toast Animations */
+
+/* ========== Worker Activity Pulse ========== */
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.6);
+  }
+}
+
+.worker-active {
+  animation: pulse-glow 2s infinite;
+}
+
+/* ========== Artifact Badge Gradient ========== */
+.artifact-badge {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  transition: transform 0.2s ease-in-out;
+}
+
+.artifact-badge:hover {
+  transform: scale(1.02);
+}
+
+/* ========== Toast Animations ========== */
 @keyframes slide-in {
-from {
-transform: translateX(100%);
-opacity: 0;
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }
-to {
-transform: translateX(0);
-opacity: 1;
-}
-}
+
 @keyframes slide-out {
-from {
-transform: translateX(0);
-opacity: 1;
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
 }
-to {
-transform: translateX(100%);
-opacity: 0;
-}
-}
+
 .animate-slide-in {
-animation: slide-in 0.3s forwards;
+  animation: slide-in 0.3s forwards;
 }
+
 .animate-slide-out {
-animation: slide-out 0.3s forwards;
+  animation: slide-out 0.3s forwards;
 }
-/* Markdown Content Styling */
+
+/* ========== Markdown Content Styling ========== */
 .message-content {
-line-height: 1.75;
+  line-height: 1.75;
 }
+
 .message-content p {
-margin-bottom: 1rem;
+  margin-bottom: 1rem;
 }
+
 .message-content ul,
 .message-content ol {
-margin-top: 0.5rem;
-margin-bottom: 1rem;
-padding-left: 1.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 1rem;
+  padding-left: 1.5rem;
 }
+
 .message-content ul li {
-list-style-type: disc;
-margin-bottom: 0.5rem;
+  list-style-type: disc;
+  margin-bottom: 0.5rem;
 }
+
 .message-content ol li {
-list-style-type: decimal;
-margin-bottom: 0.5rem;
+  list-style-type: decimal;
+  margin-bottom: 0.5rem;
 }
+
 .message-content pre {
-background: #0d1117;
-padding: 1rem;
-border-radius: 0.5rem;
-overflow-x: auto;
-margin: 1rem 0;
+  background: #0d1117;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
+
 .message-content code:not([class]) {
-background-color: rgba(255, 255, 255, 0.1);
-padding: 0.2em 0.4em;
-border-radius: 0.3rem;
-font-size: 85%;
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 0.2em 0.4em;
+  border-radius: 0.3rem;
+  font-size: 85%;
+  font-family: 'Courier New', monospace;
 }
+
 .message-content h1,
 .message-content h2,
 .message-content h3 {
-font-weight: 600;
-margin-top: 1.5rem;
-margin-bottom: 0.75rem;
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: #ffffff;
 }
+
 .message-content h1 {
-font-size: 1.875rem;
+  font-size: 1.875rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 0.5rem;
 }
+
 .message-content h2 {
-font-size: 1.5rem;
+  font-size: 1.5rem;
 }
+
 .message-content h3 {
-font-size: 1.25rem;
+  font-size: 1.25rem;
 }
+
 .message-content table {
-width: 100%;
-border-collapse: collapse;
-margin: 1rem 0;
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.875rem;
 }
+
 .message-content table th,
 .message-content table td {
-border: 1px solid rgba(255, 255, 255, 0.1);
-padding: 0.5rem;
-text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.5rem;
+  text-align: left;
 }
+
 .message-content table th {
-background: rgba(255, 255, 255, 0.05);
-font-weight: 600;
+  background: rgba(255, 255, 255, 0.05);
+  font-weight: 600;
 }
-/* Smooth Scrolling */
+
+.message-content blockquote {
+  border-left: 3px solid #10a37f;
+  padding-left: 1rem;
+  margin: 1rem 0;
+  color: #a0a0a0;
+  font-style: italic;
+}
+
+.message-content a {
+  color: #10a37f;
+  text-decoration: underline;
+}
+
+.message-content a:hover {
+  color: #0d8968;
+}
+
+/* ========== Code Block Enhancements ========== */
+.message-content pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+}
+
+.message-content pre {
+  position: relative;
+}
+
+.message-content pre::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  font-size: 0.75rem;
+  color: #888;
+  text-transform: uppercase;
+}
+
+/* ========== Smooth Scrolling ========== */
 html {
-scroll-behavior: smooth;
+  scroll-behavior: smooth;
 }
-/* Focus Styles */
+
+/* ========== Focus Styles ========== */
 button:focus-visible,
 textarea:focus-visible,
 input:focus-visible {
-outline: 2px solid #10a37f;
-outline-offset: 2px;
+  outline: 2px solid #10a37f;
+  outline-offset: 2px;
 }
-/* Loading Animation for Status Indicator */
+
+/* ========== Loading Animation for Status Indicator ========== */
 @keyframes pulse {
-0%, 100% {
-opacity: 1;
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
-50% {
-opacity: 0.5;
-}
-}
+
 .animate-pulse {
-animation: pulse 1.5s infinite;
+  animation: pulse 1.5s infinite;
+}
+
+/* ========== Worker Activity Bar ========== */
+#worker-activity {
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease-in-out;
+}
+
+/* ========== Artifacts Panel ========== */
+#artifacts-panel {
+  transition: all 0.3s ease-in-out;
+}
+
+#artifacts-list > div {
+  transition: all 0.2s ease-in-out;
+}
+
+#artifacts-list > div:hover {
+  transform: translateX(4px);
+}
+
+/* ========== Modal Animations ========== */
+#artifact-modal {
+  backdrop-filter: blur(5px);
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+#artifact-modal > div {
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* ========== Session List Hover Effects ========== */
+#sessions-list li {
+  transition: all 0.2s ease-in-out;
+}
+
+#sessions-list li:hover {
+  transform: translateX(4px);
+}
+
+/* ========== Welcome Screen Animations ========== */
+#welcome-message {
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+#welcome-message button {
+  transition: all 0.2s ease-in-out;
+}
+
+#welcome-message button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(16, 163, 127, 0.3);
+}
+
+/* ========== Typing Indicator Enhancement ========== */
+#typing-indicator {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* ========== Message Entrance Animation ========== */
+@keyframes messageSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+#messages-wrapper > div {
+  animation: messageSlideIn 0.3s ease-out;
+}
+
+/* ========== File Chip Animations ========== */
+#file-preview > div {
+  animation: slideUp 0.2s ease-out;
+  transition: all 0.2s ease-in-out;
+}
+
+#file-preview > div:hover {
+  transform: scale(1.05);
+}
+
+/* ========== Responsive Adjustments ========== */
+@media (max-width: 768px) {
+  .message-content h1 {
+    font-size: 1.5rem;
+  }
+
+  .message-content h2 {
+    font-size: 1.25rem;
+  }
+
+  .message-content h3 {
+    font-size: 1.125rem;
+  }
+
+  .message-content pre {
+    font-size: 0.75rem;
+  }
+}
+
+/* ========== Print Styles ========== */
+@media print {
+  #sidebar,
+  #chat-header,
+  #chat-input-area,
+  #overlay {
+    display: none !important;
+  }
+
+  #messages-area {
+    padding-top: 0 !important;
+  }
+
+  body {
+    background: white;
+    color: black;
+  }
+
+  .message-content {
+    color: black;
+  }
+}
+
+/* ========== Utility Classes ========== */
+.gradient-text {
+  background: linear-gradient(135deg, #10a37f 0%, #0d8968 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.glass-effect {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.1) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
