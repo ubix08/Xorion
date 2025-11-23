@@ -10,14 +10,14 @@ directory = "public"
 # -------------------------------------------------
 [[durable_objects.bindings]]
 name = "AGENT"
-class_name = "AutonomousAgent"
+class_name = "OrionAgent"
 
 # -------------------------------------------------
 # Tell Cloudflare that the class exists in the bundle
 # -------------------------------------------------
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["AutonomousAgent"]
+new_sqlite_classes = ["OrionAgent"]
 
 # Increased CPU limit for complex agent operations (5 minutes)
 [durable_objects.limits]
