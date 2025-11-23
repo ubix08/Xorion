@@ -3,225 +3,354 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#10a37f">
-    <title>Orion - AI Assistant</title>
-    
-    <script src="https://cdn.tailwindcss.com"></script>
-    
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    
+    <title>Orion WebSocket Test</title>
     <style>
         body {
-            font-family: 'Inter', sans-serif;
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
         }
-        .custom-scrollbar::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: #1a1a1a;
+        h1 {
+            margin-top: 0;
+            color: #333;
         }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: #404040;
-            border-radius: 3px;
+        .config {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 4px;
         }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-            background: #505050;
+        input, button {
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 4px;
+            border: 1px solid #ddd;
         }
-        .tools-popup {
-            transition: all 0.2s ease-in-out;
+        input {
+            width: calc(100% - 22px);
+            font-size: 14px;
         }
-        @keyframes bounce {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-4px); }
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
         }
-        .animate-bounce {
-            animation: bounce 1s infinite;
+        button:hover {
+            background: #0052a3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status.connecting {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .messages {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 4px;
+            min-height: 300px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .message.user {
+            background: #e3f2fd;
+            margin-left: 20px;
+        }
+        .message.assistant {
+            background: #f1f8e9;
+            margin-right: 20px;
+        }
+        .message.status {
+            background: #fff3cd;
+            font-size: 0.9em;
+            font-style: italic;
+        }
+        .message.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .message.worker {
+            background: #e1f5fe;
+            font-size: 0.9em;
+            border-left: 3px solid #0277bd;
+        }
+        textarea {
+            width: calc(100% - 22px);
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 14px;
+            resize: vertical;
+        }
+        .send-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .send-controls button {
+            flex: 1;
         }
     </style>
 </head>
-<body class="text-gray-200 bg-[#171717]">
-
-    <div class="flex h-screen relative">
-        <!-- Sidebar -->
-        <aside id="sidebar" class="bg-black/90 w-64 fixed inset-y-0 left-0 transform -translate-x-full transition-transform duration-300 ease-in-out z-40 lg:relative lg:translate-x-0 lg:w-64 lg:flex-shrink-0 flex flex-col border-r border-gray-800">
-            <div class="p-6 flex items-center justify-between border-b border-gray-800">
-                <div class="text-2xl font-bold text-teal-500">
-                    Orion 
-                    <span class="text-sm font-normal text-gray-400">AI</span>
-                </div>
-                <button onclick="clearChat()" class="p-2 rounded-lg hover:bg-gray-800 transition-colors" title="New Chat">
-                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                    </svg>
-                </button>
+<body>
+    <div class="container">
+        <h1>🤖 Orion WebSocket Test Client</h1>
+        
+        <div class="config">
+            <label>
+                <strong>Worker URL:</strong>
+                <input type="text" id="workerUrl" value="wss://orion-agent.your-subdomain.workers.dev" placeholder="wss://your-worker.workers.dev">
+            </label>
+            <label>
+                <strong>Session ID:</strong>
+                <input type="text" id="sessionId" placeholder="Leave empty to generate new">
+            </label>
+            <button id="connectBtn" onclick="connect()">Connect</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+        </div>
+        
+        <div id="statusDiv" class="status disconnected">Disconnected</div>
+        
+        <div class="messages" id="messages"></div>
+        
+        <div style="margin-top: 20px;">
+            <textarea id="messageInput" rows="3" placeholder="Type your message here..."></textarea>
+            <div class="send-controls">
+                <button onclick="sendMessage()" id="sendBtn" disabled>Send Message</button>
+                <button onclick="clearMessages()">Clear Messages</button>
             </div>
-            
-            <nav class="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                <p class="text-xs text-gray-500 mb-2 uppercase tracking-wider">Current Session</p>
-                <div id="user-info" class="p-3 text-sm text-gray-300 bg-gray-900 rounded-lg mb-4 font-mono text-xs">
-                    Initializing...
-                </div>
-                
-                <p class="text-xs text-gray-500 mt-4 mb-2 uppercase tracking-wider">Recent Sessions</p>
-                <ul class="space-y-1">
-                    <!-- Sessions will be populated here -->
-                </ul>
-            </nav>
-            
-            <div class="p-4 border-t border-gray-800 space-y-2">
-                <button onclick="clearChat()" class="w-full text-left p-2 rounded-lg hover:bg-gray-800 transition-colors text-teal-400 flex items-center gap-2">
-                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
-                    </svg>
-                    New Session
-                </button>
-            </div>
-        </aside>
-
-        <!-- Mobile overlay -->
-        <div id="overlay" class="fixed inset-0 bg-black bg-opacity-60 z-30 hidden lg:hidden"></div>
-
-        <!-- Main Content -->
-        <main class="flex-1 flex flex-col relative overflow-hidden">
-            
-            <!-- Header -->
-            <header id="chat-header" class="fixed top-0 left-0 right-0 lg:left-64 bg-[#171717] border-b border-gray-800 shadow-xl z-20 p-4 transition-all duration-300">
-                <div class="max-w-4xl mx-auto flex items-center justify-between">
-                    <button id="menu-btn" class="lg:hidden p-2 rounded-lg hover:bg-gray-800 transition-colors">
-                        <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-                        </svg>
-                    </button>
-                    <h1 class="text-xl font-semibold text-white ml-2 lg:ml-0">Orion Chat</h1>
-                    <div id="status-indicator" class="flex items-center text-sm font-medium">
-                        <span id="status-text" class="text-gray-400">Initializing</span>
-                        <div class="w-2 h-2 rounded-full bg-gray-500 ml-2"></div>
-                    </div>
-                </div>
-            </header>
-
-            <!-- Messages Area -->
-            <div id="messages-area" class="flex-1 overflow-y-auto custom-scrollbar pt-20 pb-40">
-                <div id="chat-container" class="max-w-4xl mx-auto flex flex-col min-h-full">
-                    
-                    <!-- Welcome Message -->
-                    <div id="welcome-message" class="flex flex-col items-center justify-center text-center p-8 flex-1">
-                        <div class="w-16 h-16 mb-6 bg-gradient-to-br from-teal-500 to-blue-600 rounded-xl flex items-center justify-center shadow-lg">
-                            <svg class="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m0 0v8m0 0h4m-4 0H8" />
-                            </svg>
-                        </div>
-                        <h2 class="text-3xl font-bold mb-2 text-white">Welcome to Orion</h2>
-                        <p class="text-gray-400 max-w-md mb-8">Start a conversation with our advanced AI assistant powered by Gemini 2.5 Flash</p>
-                        
-                        <div class="flex flex-wrap gap-2 justify-center max-w-2xl">
-                            <button onclick="useSuggestion(this)" class="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors border border-white/10">
-                                What's Bitcoin's price? 💰
-                            </button>
-                            <button onclick="useSuggestion(this)" class="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors border border-white/10">
-                                Analyze this dataset 📊
-                            </button>
-                            <button onclick="useSuggestion(this)" class="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors border border-white/10">
-                                Write Python code 💻
-                            </button>
-                            <button onclick="useSuggestion(this)" class="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors border border-white/10">
-                                Latest AI news 🔍
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <!-- Messages -->
-                    <div id="messages-wrapper" class="w-full">
-                        <!-- Messages injected here -->
-                    </div>
-                    
-                    <!-- Typing Indicator -->
-                    <div id="typing-indicator" class="hidden py-4 px-4 md:px-6 bg-[#1e1e1e] border-t border-gray-800">
-                        <div class="max-w-4xl mx-auto flex items-start gap-4">
-                            <div class="w-8 h-8 flex-shrink-0 bg-teal-600 rounded-full flex items-center justify-center text-white">
-                                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m0 0v8m0 0h4m-4 0H8" />
-                                </svg>
-                            </div>
-                            <div class="flex-1 min-w-0">
-                                <h3 class="font-semibold mb-2 text-teal-400">Orion</h3>
-                                <div id="typing-text" class="text-gray-400 flex items-center gap-2">
-                                    <span>Thinking</span>
-                                    <div class="flex space-x-1">
-                                        <span class="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style="animation-delay: 0s;"></span>
-                                        <span class="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style="animation-delay: 0.15s;"></span>
-                                        <span class="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style="animation-delay: 0.3s;"></span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-            </div>
-
-            <!-- Input Area -->
-            <div id="chat-input-area" class="fixed bottom-0 left-0 right-0 lg:left-64 bg-[#171717] border-t border-gray-800 shadow-2xl p-4 transition-all duration-300 z-30">
-                <div class="max-w-4xl mx-auto">
-                    <!-- File Preview -->
-                    <div id="file-preview" class="flex flex-wrap gap-2 mb-2">
-                        <!-- File chips here -->
-                    </div>
-
-                    <form id="chat-form" class="flex items-end space-x-2">
-                        <!-- Attach Button -->
-                        <div class="relative flex-shrink-0">
-                            <button type="button" id="tools-btn" class="p-3 rounded-xl hover:bg-gray-800 transition-colors" title="Attach File">
-                                <svg class="w-6 h-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                                </svg>
-                            </button>
-                            
-                            <div id="tools-popup" class="tools-popup absolute bottom-full mb-2 left-0 w-48 bg-gray-800 p-2 rounded-xl shadow-2xl opacity-0 translate-y-2 pointer-events-none">
-                                <button type="button" id="attach-file-button" class="w-full text-left p-2 rounded-lg hover:bg-gray-700 text-white transition-colors flex items-center gap-2">
-                                    <svg class="w-5 h-5 text-teal-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                                    </svg>
-                                    Attach File
-                                </button>
-                            </div>
-                            <input type="file" id="file-input" class="hidden" multiple accept="image/*,application/pdf,.doc,.docx,.txt,.csv">
-                        </div>
-                        
-                        <!-- Input Field -->
-                        <div class="w-full flex relative">
-                            <textarea 
-                                id="chat-input" 
-                                rows="1" 
-                                class="w-full bg-[#2a2a2a] border border-white/10 rounded-xl shadow-lg py-3.5 pl-4 pr-14 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-none custom-scrollbar" 
-                                placeholder="Message Orion..."
-                            ></textarea>
-                            <button 
-                                type="submit" 
-                                id="send-button" 
-                                class="absolute right-3 top-1/2 -translate-y-1/2 p-2 bg-teal-600 rounded-lg hover:bg-teal-700 disabled:bg-gray-700 disabled:cursor-not-allowed transition-colors"
-                            >
-                                <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7" />
-                                </svg>
-                            </button>
-                        </div>
-                    </form>
-                    
-                    <p class="text-xs text-center text-gray-600 pt-3">Orion can make mistakes. Consider checking important information.</p>
-                </div>
-            </div>
-            
-        </main>
+        </div>
+        
+        <div style="margin-top: 20px; padding: 15px; background: #f0f0f0; border-radius: 4px; font-size: 0.9em;">
+            <strong>Quick Test Messages:</strong><br>
+            <button onclick="quickSend('Hello! What can you help me with?')">Simple Query</button>
+            <button onclick="quickSend('Research the top 3 AI trends for 2024')">Complex Task</button>
+            <button onclick="quickSend('Calculate 2^16')">Tool Usage</button>
+        </div>
     </div>
 
-    <script src="script.js"></script>
+    <script>
+        let ws = null;
+        let sessionId = null;
+
+        function updateStatus(text, className) {
+            const statusDiv = document.getElementById('statusDiv');
+            statusDiv.textContent = text;
+            statusDiv.className = `status ${className}`;
+        }
+
+        function addMessage(type, content) {
+            const messagesDiv = document.getElementById('messages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${type}`;
+            msgDiv.textContent = content;
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function generateSessionId() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                alert('Already connected!');
+                return;
+            }
+
+            // Get or generate session ID
+            sessionId = document.getElementById('sessionId').value || generateSessionId();
+            document.getElementById('sessionId').value = sessionId;
+
+            // Get worker URL
+            let workerUrl = document.getElementById('workerUrl').value.trim();
+            
+            // Ensure it starts with wss:// or ws://
+            if (!workerUrl.startsWith('ws://') && !workerUrl.startsWith('wss://')) {
+                workerUrl = 'wss://' + workerUrl;
+            }
+
+            // Remove any trailing slashes
+            workerUrl = workerUrl.replace(/\/+$/, '');
+
+            // Build WebSocket URL
+            const wsUrl = `${workerUrl}/api/ws?session_id=${sessionId}`;
+
+            updateStatus('Connecting...', 'connecting');
+            addMessage('status', `Connecting to ${wsUrl}`);
+
+            try {
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = () => {
+                    updateStatus(`Connected (Session: ${sessionId.substring(0, 8)}...)`, 'connected');
+                    addMessage('status', 'Connected to Orion!');
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('disconnectBtn').disabled = false;
+                    document.getElementById('sendBtn').disabled = false;
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    handleMessage(data);
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    addMessage('error', 'Connection error occurred');
+                };
+
+                ws.onclose = () => {
+                    updateStatus('Disconnected', 'disconnected');
+                    addMessage('status', 'Disconnected from Orion');
+                    document.getElementById('connectBtn').disabled = false;
+                    document.getElementById('disconnectBtn').disabled = true;
+                    document.getElementById('sendBtn').disabled = true;
+                };
+            } catch (error) {
+                updateStatus('Connection failed', 'disconnected');
+                addMessage('error', `Failed to connect: ${error.message}`);
+            }
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function handleMessage(data) {
+            console.log('Received:', data);
+
+            switch (data.type) {
+                case 'chunk':
+                    // Append to last assistant message or create new
+                    const messages = document.getElementById('messages');
+                    const lastMsg = messages.lastElementChild;
+                    
+                    if (lastMsg && lastMsg.classList.contains('assistant')) {
+                        lastMsg.textContent += data.content;
+                    } else {
+                        addMessage('assistant', data.content);
+                    }
+                    break;
+
+                case 'status':
+                    addMessage('status', `[Status] ${data.message}`);
+                    break;
+
+                case 'worker_started':
+                    addMessage('worker', `[Worker Started] ${data.worker}`);
+                    break;
+
+                case 'worker_progress':
+                    addMessage('worker', `[Worker Progress] ${data.message} ${data.progress ? data.progress + '%' : ''}`);
+                    break;
+
+                case 'worker_completed':
+                    addMessage('worker', `[Worker Completed] ${data.worker}`);
+                    break;
+
+                case 'artifact':
+                    addMessage('worker', `[Artifact Created] ${data.artifact.title} (${data.artifact.type})`);
+                    break;
+
+                case 'complete':
+                    addMessage('status', '[Complete]');
+                    break;
+
+                case 'error':
+                    addMessage('error', `[Error] ${data.message}`);
+                    break;
+
+                default:
+                    console.log('Unknown message type:', data);
+            }
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+
+            if (!message) {
+                alert('Please enter a message');
+                return;
+            }
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Not connected! Please connect first.');
+                return;
+            }
+
+            addMessage('user', message);
+
+            ws.send(JSON.stringify({
+                type: 'user_message',
+                content: message
+            }));
+
+            input.value = '';
+        }
+
+        function quickSend(message) {
+            document.getElementById('messageInput').value = message;
+            sendMessage();
+        }
+
+        function clearMessages() {
+            document.getElementById('messages').innerHTML = '';
+        }
+
+        // Allow Enter to send (Shift+Enter for new line)
+        document.getElementById('messageInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // Auto-fill worker URL if on localhost
+        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+            document.getElementById('workerUrl').value = 'ws://localhost:8787';
+        }
+    </script>
 </body>
 </html>
