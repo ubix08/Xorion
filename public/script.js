@@ -836,4 +836,203 @@ function showTypingIndicator(msg = 'Thinking…') {
 }
 
 function updateTypingIndicator(msg) {
-  if (!typing
+  if (!typingText) return;
+  typingText.innerHTML = `<div class="flex items-center gap-2"><span>${escapeHtml(msg)}</span></div>`;
+}
+
+function hideTypingIndicator() {
+  typingIndicator?.classList.add('hidden');
+}
+
+/* ========== 17. Input lock ========== */
+function disableInput() {
+  if (userInput) userInput.disabled = true;
+  if (sendButton) sendButton.disabled = true;
+}
+
+function enableInput(focus = true) {
+  if (userInput) userInput.disabled = false;
+  if (sendButton) sendButton.disabled = false;
+  if (focus && userInput) userInput.focus();
+}
+
+/* ========== 18. Scroll ========== */
+function scrollToBottom(smooth = false) {
+  const container = $('messages-area');
+  if (container) {
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: smooth ? 'smooth' : 'auto',
+    });
+  }
+}
+
+/* ========== 19. Connection status ========== */
+function updateConnectionStatus(txt, cls) {
+  const indicator = $('status-indicator');
+  const statusText = $('status-text');
+  const dot = indicator?.querySelector('.w-2.h-2');
+
+  if (dot) {
+    dot.className = `w-2 h-2 rounded-full ml-2 ${cls}`;
+  }
+
+  if (statusText) {
+    statusText.textContent = txt;
+    statusText.className =
+      cls === 'bg-teal-500' ? 'text-teal-400' : cls === 'bg-red-500' ? 'text-red-400' : 'text-gray-400';
+  }
+}
+
+/* ========== 20. Toast ========== */
+function addToast(msg, type = 'info') {
+  const colors = {
+    error: 'bg-red-600',
+    success: 'bg-teal-600',
+    info: 'bg-blue-600',
+  };
+
+  const t = document.createElement('div');
+  t.className = `fixed bottom-5 right-5 p-3 rounded-lg shadow-xl z-50 text-white text-sm transition transform translate-x-full opacity-0 ${colors[type] || colors.info}`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+
+  setTimeout(() => t.classList.remove('translate-x-full', 'opacity-0'), 10);
+  setTimeout(() => {
+    t.classList.add('translate-x-full', 'opacity-0');
+    setTimeout(() => t.remove(), 300);
+  }, 3000);
+}
+
+/* ========== 21. History ========== */
+async function loadChatHistory() {
+  if (!currentSessionId) return;
+
+  try {
+    const response = await fetch(`/api/history?session_id=${encodeURIComponent(currentSessionId)}`);
+    if (!response.ok) return;
+
+    const data = await response.json();
+    if (data.messages?.length) {
+      hideWelcome();
+      data.messages.forEach((m) => {
+        const role = m.role === 'model' ? 'assistant' : 'user';
+        const text = (m.parts || []).filter((p) => p.text).map((p) => p.text).join('\n');
+        if (text) {
+          role === 'user' ? addUserMessage(text, false) : addAssistantMessage(text, false);
+        }
+      });
+      scrollToBottom(false);
+    }
+  } catch (e) {
+    console.error('history', e);
+  }
+}
+
+/* ========== 22. Clear ========== */
+window.clearChat = async function () {
+  if (!confirm('Start a new chat? This will create a fresh session.')) return;
+
+  try {
+    await createNewSession('New Chat');
+
+    if (chatMessages) chatMessages.innerHTML = '';
+    pendingFiles = [];
+    if (filePreview) filePreview.innerHTML = '';
+    conversationStarted = false;
+    artifacts = [];
+    activeWorker = null;
+    hideWorkerActivity();
+
+    welcomeScreen?.classList.remove('hidden');
+    renderArtifacts();
+
+    addToast('New chat started', 'success');
+  } catch (e) {
+    console.error('clear', e);
+    addToast('Failed to start new chat', 'error');
+  }
+};
+
+/* ========== 23. Suggestions ========== */
+window.useSuggestion = function (el) {
+  if (!el) return;
+  const txt = el.textContent
+    .trim()
+    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '')
+    .replace(/[^\w\s\?]/g, '')
+    .trim();
+  if (userInput) userInput.value = txt;
+  if (userInput) {
+    userInput.style.height = 'auto';
+    userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
+    userInput.focus();
+  }
+};
+
+/* ========== 24. Welcome ========== */
+function hideWelcome() {
+  if (!conversationStarted) {
+    welcomeScreen?.classList.add('hidden');
+    conversationStarted = true;
+  }
+}
+
+/* ========== 25. System Status ========== */
+window.showSystemStatus = async function() {
+  if (!currentSessionId) {
+    addToast('No active session', 'error');
+    return;
+  }
+
+  try {
+    const response = await fetch(`/api/status?session_id=${encodeURIComponent(currentSessionId)}`);
+    if (!response.ok) throw new Error('Failed to fetch status');
+
+    const status = await response.json();
+    
+    const statusMsg = `
+📊 System Status:
+• Messages: ${status.messageCount || 0}
+• Artifacts: ${status.artifactCount || 0}
+• Admin Turns: ${status.metrics?.adminTurns || 0}
+• Worker Turns: ${status.metrics?.workerTurns || 0}
+• Total Delegations: ${status.metrics?.totalDelegations || 0}
+
+🔧 Registered Tools: ${status.tools?.registered?.length || 0}
+${status.tools?.registered ? status.tools.registered.map(t => `  • ${t}`).join('\n') : ''}
+
+${status.memory ? `
+🧠 Memory:
+  • Cache Hit Rate: ${(status.memory.cacheHitRate * 100).toFixed(1)}%
+  • Cache Size: ${status.memory.cacheSize}
+` : ''}
+    `.trim();
+
+    // Create status modal
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4';
+    modal.innerHTML = `
+      <div class="bg-[#1e1e1e] rounded-xl max-w-2xl w-full p-6 border border-gray-700">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-white">System Status</h3>
+          <button onclick="this.closest('.fixed').remove()" class="p-2 hover:bg-gray-700 rounded-lg">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <pre class="text-xs text-gray-300 bg-black/30 p-4 rounded-lg overflow-auto custom-scrollbar max-h-96">${escapeHtml(statusMsg)}</pre>
+        <div class="mt-4 flex justify-end">
+          <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors text-sm">
+            Close
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  } catch (e) {
+    console.error('Failed to fetch status:', e);
+    addToast('Failed to fetch system status', 'error');
+  }
+};
