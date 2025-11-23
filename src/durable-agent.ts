@@ -1,252 +1,261 @@
-// src/durable-agent-final.ts
-// FULLY SIMPLIFIED: Clean architecture with single source of truth
+// src/durable-agent.ts - Orion Durable Object (FIXED)
 
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectState } from '@cloudflare/workers-types';
-import type { Env, Message } from './types';
+import type { 
+  Env, Message, Artifact, AgentState, ProjectState,
+  WSIncomingMessage, WSOutgoingMessage
+} from './types';
 import { GeminiClient } from './gemini';
-import { AdminAgent } from './admin/admin-agent';
-import { UnifiedStorage } from './storage/d1-storage';
+import { AdminAgent, type AdminCallbacks } from './admin/admin-agent';
+import { DurableStorage } from './durable-storage';
+import { D1Manager } from './storage/d1-manager';
 import { MemoryManager } from './memory/memory-manager';
-import { Init } from './core/initialization';
+import { globalToolRegistry, createMemorySearchTool } from './tools/tool-system';
 
 // =============================================================
-// WebSocket Message Types
+// Orion Durable Object (FIXED)
 // =============================================================
 
-interface WebSocketMessage {
-  type: 'user_message' | 'get_status' | 'clear_artifacts';
-  content?: string;
-}
-
-interface WebSocketResponse {
-  type: 'chunk' | 'status' | 'complete' | 'error' | 'worker_progress';
-  content?: string;
-  message?: string;
-  error?: string;
-  worker?: string;
-  [key: string]: any;
-}
-
-// =============================================================
-// Simplified Autonomous Agent
-// =============================================================
-
-export class AutonomousAgent extends DurableObject {
-  // Core components
+export class OrionAgent extends DurableObject {
+  // Core dependencies
+  private storage: DurableStorage;
   private gemini: GeminiClient;
-  private adminAgent: AdminAgent;
-  private storage!: UnifiedStorage;
-  private memory?: SimplifiedMemoryManager;
-  
-  // Initialization
-  private init = new SimpleInit();
-  
-  // Session state
+  private admin: AdminAgent;
   private env: Env;
-  private sessionId: string;
+
+  // Optional dependencies
+  private d1?: D1Manager;
+  private memory?: MemoryManager;
+
+  // Session state
+  private sessionId?: string;
+  private initialized = false;
   private activeSockets = new Set<WebSocket>();
-  
-  // Metrics
+
+  // Performance tracking
   private metrics = {
     totalRequests: 0,
+    totalDelegations: 0,
     avgResponseTime: 0,
   };
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
     this.env = env;
+    this.storage = new DurableStorage(state);
     this.gemini = new GeminiClient({ apiKey: env.GEMINI_API_KEY });
-    this.adminAgent = new AdminAgent(this.gemini, {
-      thinkingBudget: 2048,
-      temperature: 0.7,
-      maxConversationTurns: 15,
-    });
+    this.admin = new AdminAgent(this.gemini);
 
     // Extract session ID from DO name
     const name = state.id?.name;
-    this.sessionId = name?.startsWith('session:') 
-      ? name.slice(8) 
-      : `session_${Date.now()}`;
+    if (name?.startsWith('session:')) {
+      this.sessionId = name.slice(8);
+    }
   }
 
   // =============================================================
-  // Initialization (Simple & Robust)
+  // Initialization (FIXED)
   // =============================================================
 
-  private async ensureInitialized(): Promise<void> {
-    await this.init.ensureInitialized(async () => {
-      console.log('[Agent] Initializing...');
+  private async init(): Promise<void> {
+    if (this.initialized) return;
 
-      // 1. Initialize storage (primary source of truth)
-      this.storage = new UnifiedStorage(this.state, this.sessionId, {
-        d1: this.env.DB,
-        vectorize: this.env.VECTORIZE,
-        config: {
-          maxMessages: 200,
-          replicationDelay: 2000,
-        },
-      });
+    console.log('[Orion] Initializing...');
 
-      // 2. Hydrate from D1 on cold start
-      await this.storage.hydrateFromD1();
+    // Initialize D1
+    if (this.env.DB) {
+      this.d1 = new D1Manager(this.env.DB);
+      console.log('[Orion] D1 initialized');
+    }
 
-      // 3. Initialize memory (if available)
-      if (this.env.VECTORIZE) {
-        this.memory = new SimplifiedMemoryManager(
-          this.env.VECTORIZE,
-          this.gemini,
-          this.sessionId
-        );
-        console.log('[Agent] Memory system initialized');
+    // Initialize Memory
+    if (this.sessionId && this.env.VECTORIZE) {
+      this.memory = new MemoryManager(
+        this.env.VECTORIZE,
+        this.gemini,
+        this.sessionId,
+        {} // Use default config
+      );
+
+      // ✅ FIX: Register memory search tool
+      globalToolRegistry.register(createMemorySearchTool(this.memory));
+      console.log('[Orion] Memory system initialized');
+    }
+
+    // Hydrate from D1 if storage is empty
+    if (this.sessionId && this.d1 && this.storage.getMessages().length === 0) {
+      await this.hydrateFromD1();
+    }
+
+    this.initialized = true;
+    console.log('[Orion] Initialization complete');
+  }
+
+  private async hydrateFromD1(): Promise<void> {
+    if (!this.d1 || !this.sessionId) return;
+
+    try {
+      const messages = await this.d1.loadMessages(this.sessionId, 100);
+      for (const msg of messages) {
+        await this.storage.saveMessage(msg.role as any, msg.parts || [], msg.timestamp);
       }
-
-      console.log('[Agent] Initialization complete');
-    });
+      console.log(`[Orion] Hydrated ${messages.length} messages from D1`);
+    } catch (e) {
+      console.warn('[Orion] D1 hydration failed:', e);
+    }
   }
 
   // =============================================================
-  // HTTP Fetch Handler
+  // HTTP Request Handler
   // =============================================================
 
   async fetch(request: Request): Promise<Response> {
-    await this.ensureInitialized();
-
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // WebSocket upgrade
-    if (
-      path === '/api/ws' &&
-      request.headers.get('Upgrade')?.toLowerCase() === 'websocket'
-    ) {
-      return this.handleWebSocketUpgrade(request);
+    // Extract session ID
+    if (!this.sessionId) {
+      this.sessionId = request.headers.get('X-Session-ID') || 
+                       url.searchParams.get('session_id') || 
+                       undefined;
     }
 
-    // Route to handlers
+    // Handle WebSocket upgrade (FIXED)
+    if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+      await this.init();
+      return this.handleWebSocketUpgrade();
+    }
+
+    await this.init();
+
     try {
       switch (path) {
         case '/api/chat':
           if (request.method === 'POST') {
-            return await this.handleChat(request);
+            return await this.handleChatRequest(request);
           }
           break;
 
         case '/api/history':
           if (request.method === 'GET') {
-            return await this.handleHistory();
+            return this.jsonResponse({ messages: this.storage.getMessages() });
           }
           break;
 
         case '/api/clear':
           if (request.method === 'POST') {
-            return await this.handleClear();
+            await this.storage.clearAll();
+            if (this.memory) await this.memory.clearSessionMemory();
+            return this.jsonResponse({ ok: true });
           }
           break;
 
         case '/api/status':
           if (request.method === 'GET') {
-            return await this.handleStatus();
+            return this.jsonResponse(await this.getStatus());
+          }
+          break;
+
+        case '/api/artifacts':
+          if (request.method === 'GET') {
+            return this.jsonResponse({ artifacts: this.storage.getArtifacts() });
           }
           break;
 
         case '/api/sync':
           if (request.method === 'POST') {
-            return await this.handleSync();
-          }
-          break;
-
-        case '/api/memory/search':
-          if (request.method === 'POST') {
-            return await this.handleMemorySearch(request);
+            await this.syncToD1();
+            return this.jsonResponse({ ok: true });
           }
           break;
       }
 
       return new Response('Not Found', { status: 404 });
     } catch (err: any) {
-      console.error('[Agent] Request error:', err);
+      console.error('[Orion] Request error:', err);
       return this.jsonResponse({ error: err.message }, 500);
     }
   }
 
   // =============================================================
-  // HTTP Handlers
+  // Chat Processing
   // =============================================================
 
-  private async handleChat(request: Request): Promise<Response> {
-    const body = (await request.json()) as { message: string };
-    const userMessage = body.message?.trim();
+  private async handleChatRequest(request: Request): Promise<Response> {
+    const body = await request.json() as { message: string };
+    const message = body.message?.trim();
 
-    if (!userMessage) {
+    if (!message) {
       return this.jsonResponse({ error: 'Missing message' }, 400);
     }
 
-    const response = await this.processMessage(userMessage);
-    return this.jsonResponse({ response });
+    const result = await this.processMessage(message);
+    return this.jsonResponse(result);
   }
 
-  private async handleHistory(): Promise<Response> {
-    const messages = await this.storage.getMessages();
-    return this.jsonResponse({ messages });
-  }
+  async processMessage(
+    userMessage: string,
+    callbacks?: AdminCallbacks
+  ): Promise<{ response: string; artifacts: Artifact[] }> {
+    const startTime = Date.now();
+    this.metrics.totalRequests++;
 
-  private async handleClear(): Promise<Response> {
-    await this.storage.clearAll();
-    this.adminAgent.clearArtifacts();
-    this.adminAgent.resetTurnCount();
+    // Save user message
+    await this.saveMessage('user', userMessage);
 
-    if (this.memory) {
-      await this.memory.clearSessionMemory();
+    // Build state
+    const state = await this.buildAgentState();
+
+    // Get conversation history
+    const history = this.storage.getMessages();
+
+    // Process with Admin agent
+    const result = await this.admin.process(
+      userMessage,
+      history,
+      state,
+      callbacks || {}
+    );
+
+    // Save assistant response
+    await this.saveMessage('model', result.response);
+
+    // Save artifacts (FIXED)
+    for (const artifact of result.artifacts) {
+      await this.storage.saveArtifact(artifact);
     }
 
-    return this.jsonResponse({ ok: true });
-  }
+    // Sync to D1 in background (FIXED - includes artifacts)
+    this.syncToD1().catch(e => console.warn('[Orion] Background sync failed:', e));
 
-  private async handleStatus(): Promise<Response> {
-    const storageStatus = await this.storage.getStatus();
-    const adminMetrics = this.adminAgent.getMetrics();
+    // Update metrics
+    const responseTime = Date.now() - startTime;
+    this.metrics.avgResponseTime = 
+      (this.metrics.avgResponseTime * (this.metrics.totalRequests - 1) + responseTime) /
+      this.metrics.totalRequests;
 
-    return this.jsonResponse({
-      ...storageStatus,
-      adminMetrics,
-      memoryAvailable: !!this.memory,
-      metrics: this.metrics,
-    });
-  }
-
-  private async handleSync(): Promise<Response> {
-    await this.storage.flush();
-    return this.jsonResponse({ ok: true });
-  }
-
-  private async handleMemorySearch(request: Request): Promise<Response> {
-    if (!this.memory) {
-      return this.jsonResponse({ error: 'Memory not available' }, 400);
-    }
-
-    const body = (await request.json()) as { query: string; topK?: number };
-    const results = await this.memory.searchMemory(body.query, {
-      topK: body.topK || 5,
-    });
-
-    return this.jsonResponse({ results });
+    return {
+      response: result.response,
+      artifacts: result.artifacts,
+    };
   }
 
   // =============================================================
-  // WebSocket Handler
+  // WebSocket Handling (FIXED)
   // =============================================================
 
-  private handleWebSocketUpgrade(request: Request): Response {
+  private handleWebSocketUpgrade(): Response {
     const pair = new WebSocketPair();
-    const [client, server] = Array.from(pair) as [WebSocket, WebSocket];
+    // ✅ FIX: Proper destructuring
+    const [client, server] = [pair[0], pair[1]];
 
     (server as any).accept?.();
 
     server.onmessage = (evt) => {
-      void this.handleWebSocketMessage(server, evt.data).catch((err) => {
-        console.error('[Agent] WS error:', err);
-        this.sendToSocket(server, { type: 'error', error: String(err) });
+      this.handleWebSocketMessage(server, evt.data).catch(err => {
+        console.error('[Orion] WS message error:', err);
+        this.sendWS(server, { type: 'error', message: String(err) });
       });
     };
 
@@ -254,12 +263,17 @@ export class AutonomousAgent extends DurableObject {
       this.activeSockets.delete(server);
     };
 
-    server.onerror = (evt) => {
-      console.error('[Agent] WS error:', evt);
+    server.onerror = () => {
       this.activeSockets.delete(server);
     };
 
     this.activeSockets.add(server);
+
+    // Send greeting
+    this.sendWS(server, {
+      type: 'status',
+      message: 'Connected to Orion',
+    });
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -268,158 +282,177 @@ export class AutonomousAgent extends DurableObject {
     ws: WebSocket,
     data: string | ArrayBuffer
   ): Promise<void> {
-    if (typeof data !== 'string' || ws.readyState !== WebSocket.OPEN) return;
+    if (typeof data !== 'string') return;
 
-    let message: WebSocketMessage;
+    let msg: WSIncomingMessage;
     try {
-      message = JSON.parse(data);
+      msg = JSON.parse(data);
     } catch {
-      this.sendToSocket(ws, { type: 'error', error: 'Invalid JSON' });
+      this.sendWS(ws, { type: 'error', message: 'Invalid JSON' });
       return;
     }
 
-    switch (message.type) {
+    switch (msg.type) {
       case 'user_message':
-        if (!message.content) {
-          this.sendToSocket(ws, { type: 'error', error: 'Missing content' });
+        if (!msg.content) {
+          this.sendWS(ws, { type: 'error', message: 'Missing content' });
           return;
         }
-        await this.processWebSocketMessage(message.content, ws);
+        await this.processWebSocketMessage(ws, msg.content);
         break;
 
-      case 'get_status':
-        const status = await this.storage.getStatus();
-        this.sendToSocket(ws, { type: 'status', ...status });
-        break;
-
-      case 'clear_artifacts':
-        this.adminAgent.clearArtifacts();
-        this.sendToSocket(ws, { type: 'status', message: 'Artifacts cleared' });
+      case 'cancel':
+        // TODO: Implement cancellation
+        this.sendWS(ws, { type: 'status', message: 'Cancellation not yet implemented' });
         break;
 
       default:
-        this.sendToSocket(ws, { type: 'error', error: 'Unknown message type' });
+        this.sendWS(ws, { type: 'error', message: `Unknown type: ${msg.type}` });
     }
   }
 
   private async processWebSocketMessage(
-    userMessage: string,
-    ws: WebSocket
+    ws: WebSocket,
+    userMessage: string
   ): Promise<void> {
-    const startTime = Date.now();
-    this.metrics.totalRequests++;
+    // Create callbacks for streaming
+    const callbacks: AdminCallbacks = {
+      onChunk: (chunk) => {
+        this.sendWS(ws, { type: 'chunk', content: chunk });
+      },
+      onStatus: (message) => {
+        this.sendWS(ws, { type: 'status', message });
+      },
+      onWorkerProgress: (event) => {
+        this.sendWS(ws, event);
+      },
+      onArtifact: (artifact) => {
+        this.sendWS(ws, { type: 'artifact', artifact });
+      },
+    };
 
     try {
-      const response = await this.processMessage(userMessage, {
-        onChunk: (chunk) => this.sendToSocket(ws, { type: 'chunk', content: chunk }),
-        onStatus: (status) => this.sendToSocket(ws, { type: 'status', message: status }),
-        onWorkerProgress: (worker, msg) =>
-          this.sendToSocket(ws, { type: 'worker_progress', worker, message: msg }),
+      const result = await this.processMessage(userMessage, callbacks);
+      
+      this.sendWS(ws, {
+        type: 'complete',
+        content: result.response,
       });
-
-      this.sendToSocket(ws, { type: 'complete', response });
-
-      // Update metrics
-      const responseTime = Date.now() - startTime;
-      this.metrics.avgResponseTime =
-        (this.metrics.avgResponseTime * (this.metrics.totalRequests - 1) + responseTime) /
-        this.metrics.totalRequests;
     } catch (error) {
-      console.error('[Agent] Processing error:', error);
-      this.sendToSocket(ws, {
+      this.sendWS(ws, {
         type: 'error',
-        error: error instanceof Error ? error.message : String(error),
+        message: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
   // =============================================================
-  // Core Message Processing
+  // State Management
   // =============================================================
 
-  private async processMessage(
-    userMessage: string,
-    callbacks?: {
-      onChunk?: (chunk: string) => void;
-      onStatus?: (message: string) => void;
-      onWorkerProgress?: (worker: string, message: string) => void;
+  private async buildAgentState(): Promise<AgentState> {
+    const baseState = await this.storage.loadState();
+
+    // Enhance with memory context
+    if (this.memory) {
+      try {
+        const recentMessages = this.storage.getMessages().slice(-5);
+        const query = recentMessages
+          .filter(m => m.role === 'user')
+          .map(m => m.parts?.[0]?.text || '')
+          .join(' ');
+
+        if (query) {
+          const memoryResults = await this.memory.searchMemory(query, { topK: 5 });
+          baseState.context.memoryContext = memoryResults
+            .map(r => r.content)
+            .join('\n\n');
+        }
+      } catch (e) {
+        console.warn('[Orion] Memory search failed:', e);
+      }
     }
-  ): Promise<string> {
-    // 1. Save user message
-    await this.storage.saveMessage({
-      role: 'user',
-      parts: [{ text: userMessage }],
-      timestamp: Date.now(),
-    });
 
-    // 2. Get conversation history
-    const history = await this.storage.getMessages();
+    return baseState;
+  }
 
-    // 3. Build memory context
-    const memoryContext = this.memory
-      ? await this.memory.buildContext(userMessage)
-      : '';
+  // =============================================================
+  // Persistence (FIXED)
+  // =============================================================
 
-    // 4. Get agent state
+  private async saveMessage(role: 'user' | 'model', content: string): Promise<void> {
+    const parts = [{ text: content }];
+    const timestamp = Date.now();
+    
+    await this.storage.saveMessage(role, parts, timestamp);
+  }
+
+  private async syncToD1(): Promise<void> {
+    if (!this.d1 || !this.sessionId) return;
+
+    try {
+      // Sync messages
+      const messages = this.storage.getMessages();
+      if (messages.length === 0) return;
+
+      const latestInD1 = await this.d1.getLatestMessageTimestamp(this.sessionId);
+      const newMessages = messages.filter(m => (m.timestamp || 0) > latestInD1);
+
+      if (newMessages.length > 0) {
+        await this.d1.saveMessages(this.sessionId, newMessages);
+        console.log(`[Orion] Synced ${newMessages.length} messages to D1`);
+      }
+
+      // ✅ FIX: Sync artifacts too
+      const artifacts = this.storage.getArtifacts();
+      for (const artifact of artifacts) {
+        await this.d1.saveArtifact(this.sessionId, artifact);
+      }
+
+    } catch (err) {
+      console.error('[Orion] D1 sync failed:', err);
+    }
+  }
+
+  // =============================================================
+  // Status & Metrics
+  // =============================================================
+
+  private async getStatus(): Promise<object> {
+    const storageStatus = this.storage.getStatus();
     const state = await this.storage.loadState();
 
-    // 5. Process via Admin Agent
-    const response = await this.adminAgent.processUserMessage(
-      userMessage,
-      history,
-      memoryContext,
-      state,
-      callbacks || {}
-    );
-
-    // 6. Save model response
-    await this.storage.saveMessage({
-      role: 'model',
-      parts: [{ text: response }],
-      timestamp: Date.now(),
-    });
-
-    // 7. Save memory (async, best effort)
-    if (this.memory) {
-      this.memory.saveMemory(userMessage, {
-        type: 'user_query',
-        response: response.substring(0, 500),
-      }).catch(err => {
-        console.error('[Agent] Memory save failed:', err);
-      });
-    }
-
-    return response;
+    return {
+      sessionId: this.sessionId,
+      ...storageStatus,
+      currentProject: state.currentProject ? {
+        id: state.currentProject.id,
+        objective: state.currentProject.objective,
+        status: state.currentProject.status,
+        artifactCount: state.currentProject.artifacts.length,
+      } : null,
+      memory: {
+        enabled: !!this.memory,
+        contextLoaded: !!state.context.memoryContext,
+        metrics: this.memory?.getMetrics(),
+      },
+      tools: {
+        registered: globalToolRegistry.getAll().map(t => t.name),
+      },
+      metrics: this.metrics,
+    };
   }
 
   // =============================================================
-  // Alarm Handler (for replication)
+  // Utilities
   // =============================================================
 
-  async alarm(): Promise<void> {
-    console.log('[Agent] Alarm triggered - executing replication');
-    
-    try {
-      await this.storage.executeReplication();
-    } catch (err) {
-      console.error('[Agent] Replication failed:', err);
-    }
-
-    // Schedule next alarm (1 hour from now)
-    const nextAlarm = Date.now() + 3600000;
-    await this.state.storage.setAlarm(nextAlarm);
-  }
-
-  // =============================================================
-  // Utility Methods
-  // =============================================================
-
-  private sendToSocket(ws: WebSocket, message: WebSocketResponse): void {
+  private sendWS(ws: WebSocket, message: WSOutgoingMessage): void {
     if (ws.readyState !== WebSocket.OPEN) return;
     try {
       ws.send(JSON.stringify(message));
     } catch (e) {
-      console.error('[Agent] Send error:', e);
+      console.error('[Orion] WS send error:', e);
     }
   }
 
@@ -431,49 +464,44 @@ export class AutonomousAgent extends DurableObject {
   }
 
   // =============================================================
-  // RPC Methods (for Worker → DO calls)
+  // RPC Methods (Worker → DO)
   // =============================================================
 
-  public async handleChatRPC(message: string): Promise<{ response: string }> {
-    await this.ensureInitialized();
-    const response = await this.processMessage(message);
-    return { response };
+  async handleChat(message: string): Promise<{ response: string; artifacts: Artifact[] }> {
+    await this.init();
+    return this.processMessage(message);
   }
 
-  public async getHistoryRPC(): Promise<{ messages: Message[] }> {
-    await this.ensureInitialized();
-    const messages = await this.storage.getMessages();
-    return { messages };
+  async getHistory(): Promise<{ messages: Message[] }> {
+    await this.init();
+    return { messages: this.storage.getMessages() };
   }
 
-  public async clearHistoryRPC(): Promise<{ ok: boolean }> {
-    await this.ensureInitialized();
+  async clearHistory(): Promise<{ ok: boolean }> {
+    await this.init();
     await this.storage.clearAll();
-    this.adminAgent.clearArtifacts();
-    this.adminAgent.resetTurnCount();
-    if (this.memory) {
-      await this.memory.clearSessionMemory();
+    if (this.memory) await this.memory.clearSessionMemory();
+    return { ok: true };
+  }
+
+  // =============================================================
+  // Alarm Handler (for background maintenance)
+  // =============================================================
+
+  async alarm(): Promise<void> {
+    console.log('[Orion] Alarm triggered - running maintenance');
+
+    try {
+      // Sync to D1
+      await this.syncToD1();
+
+      // Schedule next alarm (every hour)
+      const nextAlarm = Date.now() + 3600000;
+      await this.storage.setAlarm(nextAlarm);
+    } catch (e) {
+      console.error('[Orion] Alarm handler error:', e);
     }
-    return { ok: true };
-  }
-
-  public async getStatusRPC(): Promise<object> {
-    await this.ensureInitialized();
-    const storageStatus = await this.storage.getStatus();
-    const adminMetrics = this.adminAgent.getMetrics();
-    return {
-      ...storageStatus,
-      adminMetrics,
-      memoryAvailable: !!this.memory,
-      metrics: this.metrics,
-    };
-  }
-
-  public async syncRPC(): Promise<{ ok: boolean }> {
-    await this.ensureInitialized();
-    await this.storage.flush();
-    return { ok: true };
   }
 }
 
-export default AutonomousAgent;
+export default OrionAgent;
