@@ -28,7 +28,7 @@ interface MemoryEntry {
   timestamp: number;
 }
 
-export class SimplifiedMemoryManager {
+export class MemoryManager {
   private vectorize: VectorizeIndex | null;
   private gemini: GeminiClient;
   private sessionId: string;
@@ -212,6 +212,7 @@ export class SimplifiedMemoryManager {
     this.embeddingCache.clear();
   }
 }
+export default MemoryManager;
 
 // =============================================================
 // USAGE COMPARISON
