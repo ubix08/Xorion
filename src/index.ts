@@ -1,10 +1,9 @@
-// src/index.ts - Orion Worker Entry Point
+// src/index.ts - Orion Worker Entry Point (WebSocket Fix)
 
 import { OrionAgent } from './durable-agent';
 import { D1Manager } from './storage/d1-manager';
 import type { Env, Session } from './types';
 
-// Export Durable Object
 export { OrionAgent };
 
 // =============================================================
@@ -29,7 +28,6 @@ function errorResponse(error: string, status = 500): Response {
   return jsonResponse({ error }, status);
 }
 
-// Simple JWT verification
 async function verifyAuth(request: Request, env: Env): Promise<boolean> {
   if (!env.JWT_SECRET) return true;
 
@@ -48,7 +46,6 @@ async function verifyAuth(request: Request, env: Env): Promise<boolean> {
   }
 }
 
-// Session ID validation
 function isValidSessionId(sessionId: string): boolean {
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   return uuidRegex.test(sessionId);
@@ -70,7 +67,6 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
       return errorResponse('Invalid credentials', 401);
     }
 
-    // Hash password
     const encoder = new TextEncoder();
     const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(password));
     const hashHex = Array.from(new Uint8Array(hashBuffer))
@@ -81,7 +77,6 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
       return errorResponse('Invalid credentials', 401);
     }
 
-    // Create token
     const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
     const payload = btoa(JSON.stringify({
       email,
@@ -164,7 +159,7 @@ async function handleD1Status(env: Env): Promise<Response> {
 }
 
 // =============================================================
-// Durable Object Routing
+// Durable Object Routing (WEBSOCKET FIX)
 // =============================================================
 
 async function routeToDurableObject(
@@ -186,7 +181,7 @@ async function routeToDurableObject(
   }
 
   try {
-    // Get or create Durable Object stub
+    // Get Durable Object stub
     const id = env.AGENT.idFromName(`session:${sessionId}`);
     const stub = env.AGENT.get(id);
 
@@ -203,15 +198,19 @@ async function routeToDurableObject(
       );
     }
 
-    // Forward request to Durable Object
+    // ✅ FIX: Create a new request with the session ID in header
+    // This ensures the DO receives the session ID
     const url = new URL(request.url);
+    const headers = new Headers(request.headers);
+    headers.set('X-Session-ID', sessionId);
+
     const forwardedRequest = new Request(url.toString(), {
       method: request.method,
-      headers: request.headers,
+      headers: headers,
       body: request.body,
     });
-    forwardedRequest.headers.set('X-Session-ID', sessionId);
 
+    // Forward to Durable Object
     return await stub.fetch(forwardedRequest);
   } catch (err: any) {
     console.error('[Worker] DO routing error:', err);
@@ -228,7 +227,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // CORS headers for all responses
+    // CORS headers
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -240,7 +239,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Public paths (no auth required)
+    // Public paths
     const publicPaths = ['/auth/', '/health', '/'];
     const isPublic = publicPaths.some(p => path.startsWith(p));
 
@@ -284,7 +283,7 @@ export default {
         return handleD1Status(env);
       }
 
-      // Session management routes
+      // Session management routes (not forwarded to DO)
       if (path === '/api/sessions') {
         if (request.method === 'GET') return handleSessionList(env);
         if (request.method === 'POST') return handleSessionCreate(request, env);
@@ -296,7 +295,8 @@ export default {
         if (request.method === 'DELETE') return handleSessionDelete(sessionId, env);
       }
 
-      // All /api/* routes go to Durable Object
+      // ✅ All other /api/* routes go to Durable Object
+      // This includes /api/ws for WebSocket connections
       if (path.startsWith('/api/')) {
         const response = await routeToDurableObject(request, env, ctx);
         
@@ -306,7 +306,10 @@ export default {
         
         return new Response(response.body, {
           status: response.status,
+          statusText: response.statusText,
           headers: newHeaders,
+          // ✅ CRITICAL: Preserve webSocket from DO response
+          webSocket: (response as any).webSocket,
         });
       }
 
