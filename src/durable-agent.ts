@@ -1,4 +1,4 @@
-// src/durable-agent.ts - Orion Durable Object (FIXED)
+// src/durable-agent.ts - Orion Durable Object (WebSocket Fix)
 
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectState } from '@cloudflare/workers-types';
@@ -14,7 +14,7 @@ import { MemoryManager } from './memory/memory-manager';
 import { globalToolRegistry, createMemorySearchTool } from './tools/tool-system';
 
 // =============================================================
-// Orion Durable Object (FIXED)
+// Orion Durable Object (WEBSOCKET FIXED)
 // =============================================================
 
 export class OrionAgent extends DurableObject {
@@ -55,7 +55,7 @@ export class OrionAgent extends DurableObject {
   }
 
   // =============================================================
-  // Initialization (FIXED)
+  // Initialization
   // =============================================================
 
   private async init(): Promise<void> {
@@ -75,10 +75,9 @@ export class OrionAgent extends DurableObject {
         this.env.VECTORIZE,
         this.gemini,
         this.sessionId,
-        {} // Use default config
+        {}
       );
 
-      // ✅ FIX: Register memory search tool
       globalToolRegistry.register(createMemorySearchTool(this.memory));
       console.log('[Orion] Memory system initialized');
     }
@@ -107,7 +106,7 @@ export class OrionAgent extends DurableObject {
   }
 
   // =============================================================
-  // HTTP Request Handler
+  // HTTP Request Handler (WEBSOCKET FIX)
   // =============================================================
 
   async fetch(request: Request): Promise<Response> {
@@ -121,12 +120,14 @@ export class OrionAgent extends DurableObject {
                        undefined;
     }
 
-    // Handle WebSocket upgrade (FIXED)
-    if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
-      await this.init();
-      return this.handleWebSocketUpgrade();
+    // ✅ FIX: Handle WebSocket BEFORE initialization
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader?.toLowerCase() === 'websocket') {
+      // Must handle WebSocket immediately, cannot await init first
+      return this.handleWebSocketUpgrade(request);
     }
 
+    // For HTTP requests, initialize normally
     await this.init();
 
     try {
@@ -221,12 +222,12 @@ export class OrionAgent extends DurableObject {
     // Save assistant response
     await this.saveMessage('model', result.response);
 
-    // Save artifacts (FIXED)
+    // Save artifacts
     for (const artifact of result.artifacts) {
       await this.storage.saveArtifact(artifact);
     }
 
-    // Sync to D1 in background (FIXED - includes artifacts)
+    // Sync to D1 in background
     this.syncToD1().catch(e => console.warn('[Orion] Background sync failed:', e));
 
     // Update metrics
@@ -242,40 +243,64 @@ export class OrionAgent extends DurableObject {
   }
 
   // =============================================================
-  // WebSocket Handling (FIXED)
+  // WebSocket Handling (COMPLETELY FIXED)
   // =============================================================
 
-  private handleWebSocketUpgrade(): Response {
+  private handleWebSocketUpgrade(request: Request): Response {
+    // Create WebSocket pair
     const pair = new WebSocketPair();
-    // ✅ FIX: Proper destructuring
     const [client, server] = [pair[0], pair[1]];
 
-    (server as any).accept?.();
+    // ✅ CRITICAL: Accept the WebSocket on the server side
+    // This must be done synchronously before returning
+    this.ctx.acceptWebSocket(server);
 
-    server.onmessage = (evt) => {
-      this.handleWebSocketMessage(server, evt.data).catch(err => {
-        console.error('[Orion] WS message error:', err);
-        this.sendWS(server, { type: 'error', message: String(err) });
-      });
-    };
+    // Setup event handlers
+    server.addEventListener('message', (event: MessageEvent) => {
+      // Initialize on first message if needed
+      if (!this.initialized) {
+        this.init().then(() => {
+          this.handleWebSocketMessage(server, event.data).catch(err => {
+            console.error('[Orion] WS message error:', err);
+            this.sendWS(server, { type: 'error', message: String(err) });
+          });
+        }).catch(err => {
+          console.error('[Orion] Init error:', err);
+          this.sendWS(server, { type: 'error', message: 'Initialization failed' });
+        });
+      } else {
+        this.handleWebSocketMessage(server, event.data).catch(err => {
+          console.error('[Orion] WS message error:', err);
+          this.sendWS(server, { type: 'error', message: String(err) });
+        });
+      }
+    });
 
-    server.onclose = () => {
+    server.addEventListener('close', () => {
       this.activeSockets.delete(server);
-    };
+      console.log('[Orion] WebSocket closed');
+    });
 
-    server.onerror = () => {
+    server.addEventListener('error', (event: Event) => {
+      console.error('[Orion] WebSocket error:', event);
       this.activeSockets.delete(server);
-    };
+    });
 
     this.activeSockets.add(server);
 
-    // Send greeting
-    this.sendWS(server, {
-      type: 'status',
-      message: 'Connected to Orion',
-    });
+    // Send greeting after a short delay to ensure connection is ready
+    setTimeout(() => {
+      this.sendWS(server, {
+        type: 'status',
+        message: 'Connected to Orion',
+      });
+    }, 100);
 
-    return new Response(null, { status: 101, webSocket: client });
+    // ✅ FIX: Return Response with status 101 and webSocket
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
   }
 
   private async handleWebSocketMessage(
@@ -302,7 +327,6 @@ export class OrionAgent extends DurableObject {
         break;
 
       case 'cancel':
-        // TODO: Implement cancellation
         this.sendWS(ws, { type: 'status', message: 'Cancellation not yet implemented' });
         break;
 
@@ -377,7 +401,7 @@ export class OrionAgent extends DurableObject {
   }
 
   // =============================================================
-  // Persistence (FIXED)
+  // Persistence
   // =============================================================
 
   private async saveMessage(role: 'user' | 'model', content: string): Promise<void> {
@@ -403,7 +427,7 @@ export class OrionAgent extends DurableObject {
         console.log(`[Orion] Synced ${newMessages.length} messages to D1`);
       }
 
-      // ✅ FIX: Sync artifacts too
+      // Sync artifacts
       const artifacts = this.storage.getArtifacts();
       for (const artifact of artifacts) {
         await this.d1.saveArtifact(this.sessionId, artifact);
@@ -485,17 +509,32 @@ export class OrionAgent extends DurableObject {
   }
 
   // =============================================================
-  // Alarm Handler (for background maintenance)
+  // WebSocket Handler (for Durable Objects WebSocket API)
+  // =============================================================
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    await this.handleWebSocketMessage(ws, message);
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    this.activeSockets.delete(ws);
+    console.log(`[Orion] WebSocket closed: ${code} ${reason}`);
+  }
+
+  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    console.error('[Orion] WebSocket error:', error);
+    this.activeSockets.delete(ws);
+  }
+
+  // =============================================================
+  // Alarm Handler
   // =============================================================
 
   async alarm(): Promise<void> {
     console.log('[Orion] Alarm triggered - running maintenance');
 
     try {
-      // Sync to D1
       await this.syncToD1();
-
-      // Schedule next alarm (every hour)
       const nextAlarm = Date.now() + 3600000;
       await this.storage.setAlarm(nextAlarm);
     } catch (e) {
