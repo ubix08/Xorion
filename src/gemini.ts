@@ -114,7 +114,7 @@ export class GeminiClient {
     onChunk?: (text: string) => void
   ): Promise<GenerateResponse> {
     return this.withRetry(async () => {
-      const model = options.model ?? 'gemini-2.5-flash';
+      const model = options.model ?? 'gemini-2.0-flash';
 
       // Format messages
       const contents = this.formatMessages(conversationHistory);
