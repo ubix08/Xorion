@@ -34,8 +34,8 @@ database_id = "7d31bd26-9b8d-48ef-903b-b0000af23af2"
 # -------------------------------------------------
 # Environment Variables
 # -------------------------------------------------
-[vars]
-GEMINI_API_KEY = "AIzaSyBwyv4eyg7wsZB248OPYR-XQzOTia97JVA"
+#[vars]
+#GEMINI_API_KEY = ""
 
 [[vectorize]]
 binding = "VECTORIZE" # available in your Worker on env.VECTORIZE
