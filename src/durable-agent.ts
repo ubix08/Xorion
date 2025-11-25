@@ -40,7 +40,7 @@ interface ParsedWorkerResponse {
 
 export class OrionAgent extends DurableObject {
   private storage: DurableStorage;
-  private gemini: EnhancedGeminiClient;
+  private gemini: GeminiClient;
   private env: Env;
   private d1?: D1Manager;
   private memory?: MemoryManager;
