@@ -1,33 +1,33 @@
-// src/durable-agent-hybrid.ts - Hybrid ReAct/XML Protocol Implementation
+// src/durable-agent-final.ts - Optimized with Gemini Best Practices
 
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectState } from '@cloudflare/workers-types';
-import type { 
-  Env, Message, Artifact, AgentState, TaskEnvelope, 
-  WSIncomingMessage, WSOutgoingMessage, WorkerType
-} from './types';
-import { GeminiClient } from './gemini';
+import type { Env, Message, Artifact, TaskEnvelope, WSOutgoingMessage } from './types';
+import { EnhancedGeminiClient } from './gemini-enhanced';
 import { DurableStorage } from './durable-storage';
 import { D1Manager } from './storage/d1-manager';
 import { MemoryManager } from './memory/memory-manager';
 import { workerRegistry } from './workers/worker-registry';
+import {
+  buildAdminSystemInstruction,
+  buildAdminUserPrompt,
+  buildWorkerSystemInstruction,
+  buildWorkerTaskPrompt,
+} from './admin/optimized-admin-prompts';
 
 // =============================================================
-// Response Parsing Types
+// Response Parsing (Simplified)
 // =============================================================
 
 interface ParsedAdminResponse {
-  thought?: string;
-  action: 'respond' | 'search' | 'memory_search' | 'delegate';
+  action: 'respond' | 'memory_search' | 'delegate';
   content: string;
   delegation?: TaskEnvelope;
+  memoryQuery?: string;
   metadata?: Record<string, any>;
 }
 
 interface ParsedWorkerResponse {
-  thinking?: string;
-  action?: string;
-  observation?: string;
   output?: string;
   summary?: string;
   confidence?: 'high' | 'medium' | 'low';
@@ -35,40 +35,38 @@ interface ParsedWorkerResponse {
 }
 
 // =============================================================
-// Orion Durable Object (Hybrid Protocol)
+// Final Orion Agent
 // =============================================================
 
 export class OrionAgent extends DurableObject {
-  // Core dependencies
   private storage: DurableStorage;
-  private gemini: GeminiClient;
+  private gemini: EnhancedGeminiClient;
   private env: Env;
-
-  // Optional services
   private d1?: D1Manager;
   private memory?: MemoryManager;
-
-  // Session state
   private sessionId?: string;
   private initialized = false;
   private activeSockets = new Set<WebSocket>();
 
-  // Metrics
+  // Cache system instruction (it's fixed)
+  private adminSystemInstruction: string;
+
   private metrics = {
     totalRequests: 0,
-    totalDelegations: 0,
+    nativeToolCalls: 0,
+    delegations: 0,
     adminTurns: 0,
     workerTurns: 0,
-    searchCalls: 0,
+    thinkingTokensUsed: 0,
   };
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
     this.env = env;
     this.storage = new DurableStorage(state);
-    this.gemini = new GeminiClient({ apiKey: env.GEMINI_API_KEY });
+    this.gemini = new EnhancedGeminiClient({ apiKey: env.GEMINI_API_KEY });
+    this.adminSystemInstruction = buildAdminSystemInstruction();
 
-    // Extract session ID
     const name = state.id?.name;
     if (name?.startsWith('session:')) {
       this.sessionId = name.slice(8);
@@ -82,14 +80,12 @@ export class OrionAgent extends DurableObject {
   private async init(): Promise<void> {
     if (this.initialized) return;
 
-    console.log('[Orion] Initializing...');
+    console.log('[FinalOrion] Initializing with optimized prompts...');
 
-    // Initialize D1
     if (this.env.DB) {
       this.d1 = new D1Manager(this.env.DB);
     }
 
-    // Initialize Memory
     if (this.sessionId && this.env.VECTORIZE) {
       this.memory = new MemoryManager(
         this.env.VECTORIZE,
@@ -99,13 +95,12 @@ export class OrionAgent extends DurableObject {
       );
     }
 
-    // Hydrate from D1
     if (this.sessionId && this.d1 && this.storage.getMessages().length === 0) {
       await this.hydrateFromD1();
     }
 
     this.initialized = true;
-    console.log('[Orion] Initialization complete');
+    console.log('[FinalOrion] Ready');
   }
 
   private async hydrateFromD1(): Promise<void> {
@@ -116,14 +111,14 @@ export class OrionAgent extends DurableObject {
       for (const msg of messages) {
         await this.storage.saveMessage(msg.role as any, msg.parts || [], msg.timestamp);
       }
-      console.log(`[Orion] Hydrated ${messages.length} messages from D1`);
+      console.log(`[FinalOrion] Hydrated ${messages.length} messages`);
     } catch (e) {
-      console.warn('[Orion] D1 hydration failed:', e);
+      console.warn('[FinalOrion] Hydration failed:', e);
     }
   }
 
   // =============================================================
-  // HTTP Request Handler
+  // HTTP Handler
   // =============================================================
 
   async fetch(request: Request): Promise<Response> {
@@ -136,7 +131,6 @@ export class OrionAgent extends DurableObject {
                        undefined;
     }
 
-    // WebSocket upgrade
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
       return this.handleWebSocketUpgrade(request);
@@ -178,156 +172,196 @@ export class OrionAgent extends DurableObject {
           }
           break;
 
-        case '/api/sync':
+        case '/api/upload':
           if (request.method === 'POST') {
-            await this.syncToD1();
-            return this.jsonResponse({ ok: true });
+            return await this.handleFileUpload(request);
+          }
+          break;
+
+        case '/api/files':
+          if (request.method === 'GET') {
+            return await this.handleListFiles();
           }
           break;
       }
 
       return new Response('Not Found', { status: 404 });
     } catch (err: any) {
-      console.error('[Orion] Request error:', err);
+      console.error('[FinalOrion] Request error:', err);
       return this.jsonResponse({ error: err.message }, 500);
     }
   }
 
   // =============================================================
-  // Chat Processing (Admin Loop - Hybrid Protocol)
+  // Admin Loop (Optimized)
   // =============================================================
 
   private async handleChatRequest(request: Request): Promise<Response> {
-    const body = await request.json() as { message: string };
+    const body = await request.json() as { 
+      message: string; 
+      images?: Array<{ data: string; mimeType: string }>;
+    };
+    
     const message = body.message?.trim();
-
     if (!message) {
       return this.jsonResponse({ error: 'Missing message' }, 400);
     }
 
-    const result = await this.executeAdminLoop(message);
+    const result = await this.executeAdminLoop(message, body.images);
     return this.jsonResponse(result);
   }
 
   async executeAdminLoop(
     userMessage: string,
+    images?: Array<{ data: string; mimeType: string }>,
     callbacks?: {
       onThought?: (thought: string) => void;
       onChunk?: (chunk: string) => void;
       onStatus?: (msg: string) => void;
-      onWorkerProgress?: (event: WSOutgoingMessage) => void;
+      onToolUse?: (tool: string, params: any) => void;
       onArtifact?: (artifact: Artifact) => void;
     }
   ): Promise<{ response: string; artifacts: Artifact[] }> {
     const startTime = Date.now();
     this.metrics.totalRequests++;
 
-    callbacks?.onStatus?.('Processing your request...');
+    callbacks?.onStatus?.('🧠 Analyzing your request...');
 
     // Save user message
     await this.saveMessage('user', userMessage);
 
-    // Load conversation context
-    const context = this.storage.getMessages();
-    const artifacts: Artifact[] = [];
+    // Get files info
+    const files = await this.gemini.listFiles();
     
+    // Build user prompt with context
+    const userPrompt = buildAdminUserPrompt(userMessage, {
+      hasFiles: files.length > 0,
+      hasImages: !!images,
+      fileCount: files.length,
+      conversationLength: this.storage.getMessages().length,
+      memoryAvailable: !!this.memory,
+    });
+
+    const artifacts: Artifact[] = [];
     let turn = 0;
-    const maxTurns = 12;
-    let fullResponse = '';
+    const maxTurns = 10;
+
+    // Conversation history for context
+    const conversationHistory = this.formatContextForGemini(
+      this.storage.getMessages().slice(-10) // Last 10 messages for context
+    );
 
     while (turn < maxTurns) {
       turn++;
       this.metrics.adminTurns++;
 
-      callbacks?.onStatus?.(`Admin analyzing (turn ${turn}/${maxTurns})...`);
+      callbacks?.onStatus?.(`Processing (turn ${turn}/${maxTurns})...`);
 
-      // Build Admin prompt with ReAct protocol
-      const adminPrompt = this.buildAdminPrompt(context, turn === 1 ? userMessage : undefined);
-      
-      // Call Gemini (no function calling - pure text)
-      const response = await this.gemini.generateWithTools(
-        [{ role: 'user', content: adminPrompt }],
-        [], // No tools - we parse text responses
+      // Build messages array: system instruction is separate
+      const messages = [
+        { role: 'system', content: this.adminSystemInstruction },
+        ...conversationHistory,
+        { role: 'user', content: turn === 1 ? userPrompt : 'Continue with your task.' },
+      ];
+
+      // Call Gemini with all native tools enabled
+      const response = await this.gemini.generateWithNativeTools(
+        messages,
         {
           stream: true,
-          temperature: 0.7,
-          useSearch: false,
-          onChunk: callbacks?.onChunk,
+          temperature: 1.0, // Keep default as per Gemini 3 recommendations
+          thinkingConfig: {
+            thinkingBudget: 8192,
+            enableThinking: true,
+          },
+          useSearch: true,
+          useMaps: true,
+          useCodeExecution: true,
+          useFileSearch: files.length > 0,
+          images: turn === 1 ? images : undefined,
+          files: files.length > 0 ? files : undefined,
+          maxOutputTokens: 8192,
         }
       );
 
-      const responseText = response.text;
-      
-      // Parse the Admin's response
-      const parsed = this.parseAdminResponse(responseText);
-
-      // Share thinking with user
-      if (parsed.thought && callbacks?.onThought) {
-        callbacks.onThought(parsed.thought);
+      // Track metrics
+      if (response.usageMetadata) {
+        this.metrics.thinkingTokensUsed += response.usageMetadata.totalTokens;
       }
 
-      // Handle based on action type
+      // Stream thinking
+      if (response.thinking && callbacks?.onThought) {
+        callbacks.onThought(response.thinking);
+      }
+
+      // Track native tool usage
+      if (response.searchResults) {
+        this.metrics.nativeToolCalls++;
+        callbacks?.onToolUse?.('google_search', { 
+          query: 'automatic', 
+          results: response.searchResults.length 
+        });
+      }
+
+      if (response.codeExecutionResults) {
+        this.metrics.nativeToolCalls++;
+        callbacks?.onToolUse?.('code_execution', { 
+          executed: response.codeExecutionResults.length 
+        });
+      }
+
+      // Parse response
+      const parsed = this.parseAdminResponse(response.text, response);
+
+      // Handle actions
       switch (parsed.action) {
         case 'respond':
-          // Admin answered directly - save and return
-          fullResponse = parsed.content;
+          // Direct response - complete
+          const fullResponse = parsed.content;
           await this.saveMessage('model', fullResponse);
           
-          // Background sync
-          this.syncToD1().catch(e => console.warn('[Orion] Sync failed:', e));
+          // Save to memory
+          if (this.memory) {
+            this.saveToMemory(userMessage, fullResponse).catch(console.warn);
+          }
           
-          console.log(`[Orion] Admin loop completed in ${Date.now() - startTime}ms, ${turn} turns`);
+          // Background D1 sync
+          this.syncToD1().catch(console.warn);
+          
+          console.log(`[FinalOrion] Completed in ${Date.now() - startTime}ms, ${turn} turns`);
           return { response: fullResponse, artifacts };
 
-        case 'search':
-          // Admin wants to search web
-          callbacks?.onStatus?.('Searching the web...');
-          this.metrics.searchCalls++;
-          
-          const searchResults = await this.performWebSearch(parsed.content);
-          
-          // Add search results to context
-          context.push({
-            role: 'user',
-            parts: [{ text: `[SEARCH RESULTS]\n${searchResults}` }],
-            timestamp: Date.now(),
-            metadata: { isInternal: true },
-          });
-          break;
-
         case 'memory_search':
-          // Admin wants to search memory
-          callbacks?.onStatus?.('Searching conversation memory...');
+          // Memory search
+          callbacks?.onStatus?.('💾 Searching conversation memory...');
           
-          const memoryResults = await this.performMemorySearch(parsed.content);
+          const memoryResults = await this.performMemorySearch(parsed.memoryQuery!);
           
-          context.push({
+          conversationHistory.push({
             role: 'user',
-            parts: [{ text: `[MEMORY RESULTS]\n${memoryResults}` }],
-            timestamp: Date.now(),
-            metadata: { isInternal: true },
+            content: `<memory_results>\n${memoryResults}\n</memory_results>`,
           });
           break;
 
         case 'delegate':
-          // Admin is delegating to a worker
+          // Worker delegation
           if (!parsed.delegation) {
-            context.push({
+            conversationHistory.push({
               role: 'user',
-              parts: [{ text: '[ERROR] Invalid delegation format. Please try again.' }],
-              timestamp: Date.now(),
+              content: '<error>Invalid delegation format. Please correct and try again.</error>',
             });
             break;
           }
 
-          callbacks?.onStatus?.(`Delegating to ${parsed.delegation.workerType}...`);
+          callbacks?.onStatus?.(`👤 Delegating to ${parsed.delegation.workerType}...`);
+          this.metrics.delegations++;
           
           const workerResult = await this.executeWorkerLoop(
             parsed.delegation,
             callbacks
           );
 
-          // Parse worker result
+          // Handle worker result
           if (workerResult.success && workerResult.artifactId) {
             const artifact = this.storage.getArtifacts().find(
               a => a.id === workerResult.artifactId
@@ -338,37 +372,40 @@ export class OrionAgent extends DurableObject {
             }
           }
 
-          // Add worker result to context
           const workerSummary = workerResult.success
-            ? `Worker ${parsed.delegation.workerType} completed successfully.\nSummary: ${workerResult.summary}\nArtifact ID: ${workerResult.artifactId}`
-            : `Worker ${parsed.delegation.workerType} failed: ${workerResult.error}`;
+            ? `<worker_result status="success">
+Worker: ${parsed.delegation.workerType}
+Summary: ${workerResult.summary}
+Artifact ID: ${workerResult.artifactId}
+</worker_result>`
+            : `<worker_result status="failed">
+Worker: ${parsed.delegation.workerType}
+Error: ${workerResult.error}
+</worker_result>`;
 
-          context.push({
+          conversationHistory.push({
             role: 'user',
-            parts: [{ text: `[WORKER RESULT]\n${workerSummary}` }],
-            timestamp: Date.now(),
-            metadata: { isInternal: true },
+            content: workerSummary,
           });
           break;
       }
 
-      // Add assistant response to context (for continuity)
-      context.push({
-        role: 'model',
-        parts: [{ text: responseText }],
-        timestamp: Date.now(),
+      // Add assistant's response to history
+      conversationHistory.push({
+        role: 'assistant',
+        content: response.text,
       });
     }
 
     // Max turns reached
-    fullResponse = 'I apologize, but I reached my processing limit. Let me summarize what I was able to accomplish...';
-    await this.saveMessage('model', fullResponse);
+    const timeoutResponse = 'I reached my processing limit while working on your request. Let me summarize what I was able to accomplish so far...';
+    await this.saveMessage('model', timeoutResponse);
     
-    return { response: fullResponse, artifacts };
+    return { response: timeoutResponse, artifacts };
   }
 
   // =============================================================
-  // Worker Loop (Pure ReAct - No Delegation)
+  // Worker Loop (Optimized)
   // =============================================================
 
   private async executeWorkerLoop(
@@ -406,16 +443,29 @@ export class OrionAgent extends DurableObject {
       taskId: envelope.taskId,
     });
 
-    // Build worker system prompt with ReAct protocol
-    const systemPrompt = this.buildWorkerSystemPrompt(config);
-    const taskPrompt = this.buildWorkerTaskPrompt(envelope);
+    // Build system instruction for worker
+    const systemInstruction = buildWorkerSystemInstruction(envelope.workerType, {
+      name: config.name,
+      description: config.description,
+      capabilities: config.capabilities,
+      outputFormat: envelope.expectedOutput.format,
+    });
 
-    const workerContext: string[] = [];
+    // Build task prompt
+    const taskPrompt = buildWorkerTaskPrompt({
+      objective: envelope.objective,
+      context: envelope.context,
+      instructions: envelope.instructions,
+      constraints: envelope.constraints,
+      format: envelope.expectedOutput.format,
+      qualityCriteria: envelope.qualityCriteria,
+    });
+
     const toolsUsed: string[] = [];
-    
     let turn = 0;
-    const maxTurns = config.maxTurns || 10;
-    let lastResponse = '';
+    const maxTurns = config.maxTurns || 8;
+
+    const workerHistory: Array<{ role: string; content: string }> = [];
 
     while (turn < maxTurns) {
       turn++;
@@ -429,47 +479,49 @@ export class OrionAgent extends DurableObject {
         progress: Math.round((turn / maxTurns) * 100),
       });
 
-      // Build conversation for this turn
-      const conversation = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: turn === 1 ? taskPrompt : 'Continue with your task using the ReAct protocol.' },
-        ...workerContext.map((ctx, i) => ({
-          role: i % 2 === 0 ? 'assistant' : 'user',
-          content: ctx,
-        })),
+      // Build messages
+      const messages = [
+        { role: 'system', content: systemInstruction },
+        { role: 'user', content: turn === 1 ? taskPrompt : 'Continue with your task. Remember to output in the specified format when complete.' },
+        ...workerHistory,
       ];
 
-      // Call Gemini (no function calling)
-      const response = await this.gemini.generateWithTools(
-        conversation,
-        [],
+      // Call Gemini
+      const response = await this.gemini.generateWithNativeTools(
+        messages,
         {
           stream: false,
-          temperature: config.temperature,
+          temperature: config.temperature || 0.7,
           useSearch: config.tools.some(t => t.name === 'web_search' && t.enabled),
           useCodeExecution: config.tools.some(t => t.name === 'code_execution' && t.enabled),
+          thinkingConfig: {
+            thinkingBudget: 4096,
+            enableThinking: true,
+          },
+          maxOutputTokens: 8192,
         }
       );
 
-      lastResponse = response.text;
+      // Track tools used
+      if (response.searchResults) toolsUsed.push('web_search');
+      if (response.codeExecutionResults) toolsUsed.push('code_execution');
 
-      // Parse worker response (ReAct pattern)
-      const parsed = this.parseWorkerResponse(lastResponse);
+      // Parse worker response
+      const parsed = this.parseWorkerResponse(response.text);
 
-      // Check if worker is done
       if (parsed.complete && parsed.output) {
-        // Create artifact
+        // Worker is done!
         const artifact = await this.createArtifact(
           envelope,
           parsed.output,
-          config.type
+          envelope.workerType
         );
 
         await this.storage.saveArtifact(artifact);
 
         callbacks?.onWorkerProgress?.({
           type: 'worker_completed',
-          message: `${config.name} completed`,
+          message: `${config.name} completed successfully`,
           worker: envelope.workerType,
           taskId: envelope.taskId,
         });
@@ -478,93 +530,73 @@ export class OrionAgent extends DurableObject {
           success: true,
           summary: parsed.summary || envelope.objective,
           artifactId: artifact.id,
-          toolsUsed,
+          toolsUsed: [...new Set(toolsUsed)],
           turnsUsed: turn,
         };
       }
 
-      // Worker is executing an action (search, code, etc.)
-      if (parsed.action) {
-        const actionResult = await this.executeWorkerAction(
-          parsed.action,
-          parsed.observation || '',
-          config
-        );
-
-        if (actionResult.tool) {
-          toolsUsed.push(actionResult.tool);
-        }
-
-        // Add to context
-        workerContext.push(lastResponse);
-        workerContext.push(`[OBSERVATION]\n${actionResult.result}`);
-        continue;
-      }
-
-      // Worker is thinking but not acting - prompt to continue
-      workerContext.push(lastResponse);
-      workerContext.push('[INSTRUCTION] Continue. Remember to use the OUTPUT format when complete.');
+      // Not done yet - continue
+      workerHistory.push(
+        { role: 'assistant', content: response.text },
+        { role: 'user', content: '<instruction>Continue working on the task. Output your final deliverable when ready.</instruction>' }
+      );
     }
 
-    // Max turns reached without completion
-    console.warn(`[Worker:${config.type}] Max turns reached`);
+    // Max turns reached
+    console.warn(`[Worker:${config.type}] Max turns reached without completion`);
 
     return {
       success: false,
       summary: 'Task incomplete',
       error: 'Worker exceeded maximum turns without completing task',
-      toolsUsed,
+      toolsUsed: [...new Set(toolsUsed)],
       turnsUsed: turn,
     };
   }
 
   // =============================================================
-  // Response Parsing (Text-Based)
+  // Response Parsing
   // =============================================================
 
-  private parseAdminResponse(text: string): ParsedAdminResponse {
-    // Extract THOUGHT
-    const thoughtMatch = text.match(/THOUGHT:\s*([^\n]+(?:\n(?!ACTION:)[^\n]+)*)/i);
-    const thought = thoughtMatch ? thoughtMatch[1].trim() : undefined;
+  private parseAdminResponse(
+    text: string,
+    geminiResponse: any
+  ): ParsedAdminResponse {
+    // Check for memory search (explicit)
+    const memoryMatch = text.match(/\[MEMORY_SEARCH:\s*([^\]]+)\]/i);
+    if (memoryMatch) {
+      return {
+        action: 'memory_search',
+        content: text,
+        memoryQuery: memoryMatch[1].trim(),
+      };
+    }
 
-    // Check for delegation XML
+    // Check for delegation (explicit)
     const delegateMatch = text.match(/<delegate>([\s\S]*?)<\/delegate>/);
     if (delegateMatch) {
       const delegation = this.parseDelegationXML(delegateMatch[1]);
       if (delegation) {
         return {
-          thought,
           action: 'delegate',
           content: text.replace(/<delegate>[\s\S]*?<\/delegate>/, '').trim(),
           delegation,
+          metadata: {
+            searchResults: geminiResponse.searchResults,
+            codeExecutionResults: geminiResponse.codeExecutionResults,
+          },
         };
       }
     }
 
-    // Check for search commands
-    const searchMatch = text.match(/\[SEARCH:\s*([^\]]+)\]/i);
-    if (searchMatch) {
-      return {
-        thought,
-        action: 'search',
-        content: searchMatch[1].trim(),
-      };
-    }
-
-    const memoryMatch = text.match(/\[MEMORY_SEARCH:\s*([^\]]+)\]/i);
-    if (memoryMatch) {
-      return {
-        thought,
-        action: 'memory_search',
-        content: memoryMatch[1].trim(),
-      };
-    }
-
     // Default: direct response
     return {
-      thought,
       action: 'respond',
       content: text.trim(),
+      metadata: {
+        searchResults: geminiResponse.searchResults,
+        codeExecutionResults: geminiResponse.codeExecutionResults,
+      },
     };
   }
 
@@ -575,11 +607,11 @@ export class OrionAgent extends DurableObject {
         return match ? match[1].trim() : '';
       };
 
-      const workerType = extract('worker') as WorkerType;
+      const workerType = extract('worker') as any;
       const objective = extract('objective');
 
       if (!workerType || !objective) {
-        console.warn('[Orion] Invalid delegation XML - missing worker or objective');
+        console.warn('[FinalOrion] Invalid delegation - missing worker or objective');
         return null;
       }
 
@@ -590,258 +622,101 @@ export class OrionAgent extends DurableObject {
         context: extract('context'),
         instructions: extract('instructions'),
         constraints: extract('constraints').split('\n').filter(Boolean),
-        expectedOutput: {
-          format: (extract('format') as any) || 'markdown',
-        },
+        expectedOutput: { format: (extract('format') as any) || 'markdown' },
         qualityCriteria: extract('quality').split('\n').filter(Boolean),
       };
     } catch (e) {
-      console.error('[Orion] XML parsing error:', e);
+      console.error('[FinalOrion] Delegation XML parsing error:', e);
       return null;
     }
   }
 
   private parseWorkerResponse(text: string): ParsedWorkerResponse {
-    const result: ParsedWorkerResponse = { complete: false };
-
-    // Extract THINKING
-    const thinkingMatch = text.match(/THINKING:\s*([^\n]+(?:\n(?!ACTION:|OBSERVATION:|OUTPUT:)[^\n]+)*)/i);
-    if (thinkingMatch) {
-      result.thinking = thinkingMatch[1].trim();
-    }
-
-    // Extract ACTION
-    const actionMatch = text.match(/ACTION:\s*([^\n]+)/i);
-    if (actionMatch) {
-      result.action = actionMatch[1].trim();
-    }
-
-    // Extract OBSERVATION
-    const observationMatch = text.match(/OBSERVATION:\s*([^\n]+(?:\n(?!THINKING:|ACTION:|OUTPUT:)[^\n]+)*)/i);
-    if (observationMatch) {
-      result.observation = observationMatch[1].trim();
-    }
-
-    // Check for OUTPUT (completion marker)
+    // Look for OUTPUT section
     const outputMatch = text.match(/OUTPUT:\s*\n([\s\S]*?)(?:\n\nSUMMARY:|$)/i);
     if (outputMatch) {
-      result.output = outputMatch[1].trim();
-      result.complete = true;
-
+      const output = outputMatch[1].trim();
+      
       // Extract SUMMARY
       const summaryMatch = text.match(/SUMMARY:\s*([^\n]+)/i);
-      if (summaryMatch) {
-        result.summary = summaryMatch[1].trim();
-      }
-
+      const summary = summaryMatch ? summaryMatch[1].trim() : undefined;
+      
       // Extract CONFIDENCE
       const confMatch = text.match(/CONFIDENCE:\s*(high|medium|low)/i);
-      if (confMatch) {
-        result.confidence = confMatch[1].toLowerCase() as 'high' | 'medium' | 'low';
-      }
+      const confidence = confMatch ? confMatch[1].toLowerCase() as any : undefined;
+
+      return {
+        output,
+        summary,
+        confidence,
+        complete: true,
+      };
     }
 
-    return result;
+    // Not complete yet
+    return { complete: false };
   }
 
   // =============================================================
-  // Prompt Building
+  // Helper Methods
   // =============================================================
 
-  private buildAdminPrompt(context: Message[], userMessage?: string): string {
-    const recentContext = context.slice(-20).map(msg => {
-      const content = this.extractMessageContent(msg);
-      return `${msg.role.toUpperCase()}: ${content}`;
-    }).join('\n\n');
-
-    return `You are Orion's Admin Agent - a professional AI collaborator who orchestrates complex tasks.
-
-PROTOCOL - HYBRID REACT/XML:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-For every request, follow this structure:
-
-THOUGHT: [Analyze the request - what's the complexity? What's needed?]
-
-ACTION: [Choose ONE of these options]
-  1. Direct Response: Just answer naturally (no special format needed)
-  2. Web Search: [SEARCH: your search query]
-  3. Memory Search: [MEMORY_SEARCH: query for past context]
-  4. Delegate to Worker: Use XML format below
-
-DELEGATION FORMAT (Only for complex tasks requiring specialists):
-<delegate>
-  <worker>deep_search|data_analyst|content_writer|code_developer|report_generator</worker>
-  <objective>Clear, specific goal</objective>
-  <context>All relevant background information</context>
-  <instructions>Step-by-step guidance for the worker</instructions>
-  <format>markdown|json|code|report</format>
-  <quality>Success criteria</quality>
-</delegate>
-
-AVAILABLE WORKERS:
-- deep_search: Multi-source research with synthesis
-- data_analyst: Statistical analysis and visualizations
-- content_writer: Blog posts, articles, marketing copy
-- code_developer: Full applications and scripts
-- report_generator: Professional reports and presentations
-
-PERSONALITY:
-- Be warm and conversational
-- Show your reasoning transparently
-- Admit when you need help
-- Celebrate successful completions
-
-CONVERSATION HISTORY:
-${recentContext}
-
-${userMessage ? `\nCURRENT USER REQUEST:\n${userMessage}` : ''}
-
-Now respond following the THOUGHT → ACTION protocol:`;
+  private formatContextForGemini(messages: Message[]): Array<{ role: string; content: string }> {
+    return messages.map(msg => ({
+      role: msg.role === 'model' ? 'assistant' : 'user',
+      content: this.extractMessageContent(msg),
+    }));
   }
 
-  private buildWorkerSystemPrompt(config: any): string {
-    return `${config.systemPrompt}
-
-PROTOCOL - REACT TEXT PATTERN:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-You MUST follow this exact format for every response:
-
-THINKING: [Your analysis of the current situation and what to do next]
-
-ACTION: [The action you're taking - e.g., "Search for X" or "Analyze data" or "Write content"]
-
-OBSERVATION: [What you learned from your action - results, insights, findings]
-
-Then repeat THINKING → ACTION → OBSERVATION until you're ready to deliver final output.
-
-When you have completed the task, format your final response as:
-
-OUTPUT:
-[Your complete deliverable here in the requested format]
-
-SUMMARY: [One sentence describing what was accomplished]
-CONFIDENCE: [high|medium|low]
-
-CRITICAL RULES:
-- Focus ONLY on the assigned task - no scope expansion
-- Use available tools when needed (search, code execution)
-- Be thorough but efficient
-- If you cannot complete the task, explain why clearly in OUTPUT
-
-Available capabilities: ${config.capabilities.join(', ')}`;
-  }
-
-  private buildWorkerTaskPrompt(envelope: TaskEnvelope): string {
-    const constraintsList = envelope.constraints.length > 0
-      ? envelope.constraints.map((c, i) => `${i + 1}. ${c}`).join('\n')
-      : 'None specified';
-
-    const criteriaList = envelope.qualityCriteria.length > 0
-      ? envelope.qualityCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n')
-      : '1. High-quality output\n2. Complete and thorough';
-
-    return `TASK ASSIGNMENT:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-OBJECTIVE: ${envelope.objective}
-
-CONTEXT:
-${envelope.context || 'No additional context provided'}
-
-INSTRUCTIONS:
-${envelope.instructions}
-
-CONSTRAINTS:
-${constraintsList}
-
-OUTPUT FORMAT: ${envelope.expectedOutput.format}
-
-QUALITY CRITERIA:
-${criteriaList}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Begin working on this task now using the THINKING → ACTION → OBSERVATION protocol.`;
-  }
-
-  // =============================================================
-  // Tool/Action Execution
-  // =============================================================
-
-  private async performWebSearch(query: string): Promise<string> {
-    // Gemini's native search will handle this when useSearch: true
-    // This is a fallback for when we need explicit search control
-    try {
-      const response = await this.gemini.generateWithTools(
-        [{ role: 'user', content: `Search the web for: ${query}\n\nProvide a concise summary of findings.` }],
-        [],
-        { stream: false, temperature: 0.3, useSearch: true }
-      );
-
-      return response.text || 'No search results found.';
-    } catch (e) {
-      console.error('[Orion] Search failed:', e);
-      return `Search error: ${e instanceof Error ? e.message : 'Unknown error'}`;
+  private extractMessageContent(msg: Message): string {
+    if (msg.content) return msg.content;
+    if (msg.parts) {
+      return msg.parts.map(p => p.text || '').filter(Boolean).join('\n');
     }
+    return '';
+  }
+
+  private async saveMessage(role: 'user' | 'model', content: string): Promise<void> {
+    await this.storage.saveMessage(role, [{ text: content }], Date.now());
   }
 
   private async performMemorySearch(query: string): Promise<string> {
     if (!this.memory) {
-      return 'Memory search not available (Vectorize not configured)';
+      return '<memory_error>Memory search not available - Vectorize not configured</memory_error>';
     }
-
+    
     try {
       const results = await this.memory.searchMemory(query, { topK: 5 });
-      
       if (results.length === 0) {
-        return 'No relevant past context found.';
+        return '<memory_result>No relevant past conversations found</memory_result>';
       }
-
+      
       return results
-        .map((r, i) => `[${i + 1}] ${r.content}\n   Relevance: ${Math.round(r.score * 100)}%`)
+        .map((r, i) => `<memory_item index="${i + 1}" relevance="${Math.round(r.score * 100)}%">\n${r.content}\n</memory_item>`)
         .join('\n\n');
     } catch (e) {
-      console.error('[Orion] Memory search failed:', e);
-      return 'Memory search failed.';
+      return `<memory_error>${e instanceof Error ? e.message : 'Memory search failed'}</memory_error>`;
     }
   }
 
-  private async executeWorkerAction(
-    action: string,
-    observation: string,
-    config: any
-  ): Promise<{ tool?: string; result: string }> {
-    // Parse action to determine what to execute
-    const lowerAction = action.toLowerCase();
-
-    // Web search
-    if (lowerAction.includes('search') && config.tools.some((t: any) => t.name === 'web_search' && t.enabled)) {
-      const searchQuery = this.extractSearchQuery(action);
-      const results = await this.performWebSearch(searchQuery);
-      return { tool: 'web_search', result: results };
-    }
-
-    // Code execution
-    if (lowerAction.includes('code') || lowerAction.includes('execute')) {
-      // Gemini's code execution will handle this when enabled
-      return { tool: 'code_execution', result: 'Code execution in progress...' };
-    }
-
-    // Default: just acknowledge the action
-    return { result: `Action "${action}" acknowledged. Continue with next step.` };
+  private async saveToMemory(userMsg: string, assistantMsg: string): Promise<void> {
+    if (!this.memory) return;
+    
+    await this.memory.saveMemoryBatch([
+      {
+        content: `User: ${userMsg}`,
+        type: 'conversation',
+        importance: 0.5,
+        timestamp: Date.now(),
+      },
+      {
+        content: `Assistant: ${assistantMsg.substring(0, 500)}`,
+        type: 'conversation',
+        importance: 0.5,
+        timestamp: Date.now(),
+      },
+    ]);
   }
-
-  private extractSearchQuery(action: string): string {
-    // Try to extract query from various formats
-    const match = action.match(/search\s+(?:for|about)?\s*[:\-]?\s*(.+)/i);
-    return match ? match[1].trim() : action;
-  }
-
-  // =============================================================
-  // Artifact Management
-  // =============================================================
 
   private async createArtifact(
     envelope: TaskEnvelope,
@@ -873,25 +748,6 @@ Begin working on this task now using the THINKING → ACTION → OBSERVATION pro
     };
   }
 
-  // =============================================================
-  // Message Management
-  // =============================================================
-
-  private extractMessageContent(msg: Message): string {
-    if (msg.content) return msg.content;
-    if (msg.parts) {
-      return msg.parts
-        .map(p => p.text || '')
-        .filter(Boolean)
-        .join('\n');
-    }
-    return '';
-  }
-
-  private async saveMessage(role: 'user' | 'model', content: string): Promise<void> {
-    await this.storage.saveMessage(role, [{ text: content }], Date.now());
-  }
-
   private async syncToD1(): Promise<void> {
     if (!this.d1 || !this.sessionId) return;
 
@@ -911,12 +767,45 @@ Begin working on this task now using the THINKING → ACTION → OBSERVATION pro
         await this.d1.saveArtifact(this.sessionId, artifact);
       }
     } catch (err) {
-      console.error('[Orion] D1 sync failed:', err);
+      console.error('[FinalOrion] D1 sync failed:', err);
     }
   }
 
   // =============================================================
-  // WebSocket Handling
+  // File Management
+  // =============================================================
+
+  private async handleFileUpload(request: Request): Promise<Response> {
+    try {
+      const formData = await request.formData();
+      const file = formData.get('file') as File;
+      
+      if (!file) {
+        return this.jsonResponse({ error: 'No file provided' }, 400);
+      }
+
+      const buffer = await file.arrayBuffer();
+      const base64 = Buffer.from(buffer).toString('base64');
+
+      const metadata = await this.gemini.uploadFile(
+        base64,
+        file.type,
+        file.name
+      );
+
+      return this.jsonResponse({ success: true, file: metadata });
+    } catch (err: any) {
+      return this.jsonResponse({ error: err.message }, 500);
+    }
+  }
+
+  private async handleListFiles(): Promise<Response> {
+    const files = await this.gemini.listFiles();
+    return this.jsonResponse({ files });
+  }
+
+  // =============================================================
+  // WebSocket (Simplified)
   // =============================================================
 
   private handleWebSocketUpgrade(request: Request): Response {
@@ -924,30 +813,14 @@ Begin working on this task now using the THINKING → ACTION → OBSERVATION pro
     const [client, server] = [pair[0], pair[1]];
 
     this.ctx.acceptWebSocket(server);
-
-    server.addEventListener('message', (event: MessageEvent) => {
-      if (!this.initialized) {
-        this.init().then(() => {
-          this.handleWebSocketMessage(server, event.data).catch(console.error);
-        }).catch(console.error);
-      } else {
-        this.handleWebSocketMessage(server, event.data).catch(console.error);
-      }
-    });
-
-    server.addEventListener('close', () => {
-      this.activeSockets.delete(server);
-    });
-
-    server.addEventListener('error', () => {
-      this.activeSockets.delete(server);
-    });
-
     this.activeSockets.add(server);
 
-    setTimeout(() => {
-      this.sendWS(server, { type: 'status', message: 'Connected to Orion' });
-    }, 100);
+    server.addEventListener('message', (event: MessageEvent) => {
+      this.handleWebSocketMessage(server, event.data).catch(console.error);
+    });
+
+    server.addEventListener('close', () => this.activeSockets.delete(server));
+    server.addEventListener('error', () => this.activeSockets.delete(server));
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -955,47 +828,14 @@ Begin working on this task now using the THINKING → ACTION → OBSERVATION pro
   private async handleWebSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
     if (typeof data !== 'string') return;
 
-    let msg: WSIncomingMessage;
     try {
-      msg = JSON.parse(data);
-    } catch {
-      this.sendWS(ws, { type: 'error', message: 'Invalid JSON' });
-      return;
-    }
-
-    if (msg.type === 'user_message' && msg.content) {
-      await this.processWebSocketMessage(ws, msg.content);
-    }
-  }
-
-  private async processWebSocketMessage(ws: WebSocket, userMessage: string): Promise<void> {
-    try {
-      const result = await this.executeAdminLoop(userMessage, {
-        onThought: (thought) => this.sendWS(ws, { 
-          type: 'thinking', 
-          message: `💭 ${thought}` 
-        }),
-        onChunk: (chunk) => this.sendWS(ws, { type: 'chunk', content: chunk }),
-        onStatus: (message) => this.sendWS(ws, { type: 'status', message }),
-        onWorkerProgress: (event) => this.sendWS(ws, event),
-        onArtifact: (artifact) => this.sendWS(ws, { type: 'artifact', artifact }),
-      });
-
-      this.sendWS(ws, { type: 'complete', content: result.response });
-    } catch (error) {
-      this.sendWS(ws, { 
-        type: 'error', 
-        message: error instanceof Error ? error.message : String(error) 
-      });
-    }
-  }
-
-  private sendWS(ws: WebSocket, message: WSOutgoingMessage): void {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    try {
-      ws.send(JSON.stringify(message));
+      const msg = JSON.parse(data);
+      if (msg.type === 'user_message' && msg.content) {
+        const result = await this.executeAdminLoop(msg.content, msg.images);
+        ws.send(JSON.stringify({ type: 'complete', content: result.response }));
+      }
     } catch (e) {
-      console.error('[Orion] WS send error:', e);
+      console.error('[FinalOrion] WS error:', e);
     }
   }
 
@@ -1004,45 +844,29 @@ Begin working on this task now using the THINKING → ACTION → OBSERVATION pro
   // =============================================================
 
   private async getStatus(): Promise<object> {
-    const storageStatus = this.storage.getStatus();
-
     return {
       sessionId: this.sessionId,
-      ...storageStatus,
-      protocol: {
-        admin: 'Hybrid ReAct/XML',
-        worker: 'Pure ReAct Text',
-      },
+      ...this.storage.getStatus(),
+      protocol: 'Optimized Gemini 2.5 with System Instructions',
+      promptingStrategy: 'XML-structured with few-shot examples',
       metrics: this.metrics,
+      nativeTools: {
+        googleSearch: true,
+        googleMaps: true,
+        codeExecution: true,
+        urlContext: true,
+        fileSearch: true,
+        thinking: true,
+      },
       memory: this.memory ? this.memory.getMetrics() : null,
     };
   }
-
-  // =============================================================
-  // Utilities
-  // =============================================================
 
   private jsonResponse(data: any, status = 200): Response {
     return new Response(JSON.stringify(data), {
       status,
       headers: { 'Content-Type': 'application/json' },
     });
-  }
-
-  // =============================================================
-  // Durable Object WebSocket API
-  // =============================================================
-
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    await this.handleWebSocketMessage(ws, message);
-  }
-
-  async webSocketClose(ws: WebSocket): Promise<void> {
-    this.activeSockets.delete(ws);
-  }
-
-  async webSocketError(ws: WebSocket): Promise<void> {
-    this.activeSockets.delete(ws);
   }
 }
 
