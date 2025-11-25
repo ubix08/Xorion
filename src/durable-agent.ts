@@ -13,7 +13,7 @@ import {
   buildAdminUserPrompt,
   buildWorkerSystemInstruction,
   buildWorkerTaskPrompt,
-} from './admin/admin-prompt';
+} from './admin/admin-prompts';
 
 // =============================================================
 // Response Parsing (Simplified)
