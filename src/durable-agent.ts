@@ -3,7 +3,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectState } from '@cloudflare/workers-types';
 import type { Env, Message, Artifact, TaskEnvelope, WSOutgoingMessage } from './types';
-import { EnhancedGeminiClient } from './gemini-enhanced';
+import { GeminiClient } from './gemini-enhanced';
 import { DurableStorage } from './durable-storage';
 import { D1Manager } from './storage/d1-manager';
 import { MemoryManager } from './memory/memory-manager';
@@ -13,7 +13,7 @@ import {
   buildAdminUserPrompt,
   buildWorkerSystemInstruction,
   buildWorkerTaskPrompt,
-} from './admin/optimized-admin-prompts';
+} from './admin/admin-prompt';
 
 // =============================================================
 // Response Parsing (Simplified)
@@ -64,7 +64,7 @@ export class OrionAgent extends DurableObject {
     super(state, env);
     this.env = env;
     this.storage = new DurableStorage(state);
-    this.gemini = new EnhancedGeminiClient({ apiKey: env.GEMINI_API_KEY });
+    this.gemini = new GeminiClient({ apiKey: env.GEMINI_API_KEY });
     this.adminSystemInstruction = buildAdminSystemInstruction();
 
     const name = state.id?.name;
