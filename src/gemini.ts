@@ -1,10 +1,10 @@
-// src/gemini-enhanced.ts - Enhanced Gemini Client with Full Native Capabilities
+// src/gemini-.ts -  Gemini Client with Full Native Capabilities
 
 import { GoogleGenAI } from '@google/genai';
 import type { FileMetadata } from './types';
 
 // =============================================================
-// Enhanced Types
+//  Types
 // =============================================================
 
 export interface GenerateOptions {
@@ -60,9 +60,9 @@ export interface GenerateResponse {
   codeExecutionResults?: any[];
   finishReason?: string;
   usageMetadata?: {
-    promptTokens?: number;
-    candidatesTokens?: number;
-    totalTokens?: number;
+    promptTokens: number;
+    candidatesTokens: number;
+    totalTokens: number;
   };
 }
 
@@ -73,12 +73,11 @@ export interface ToolDefinition {
 }
 
 // =============================================================
-// Enhanced Gemini Client
+//  Gemini Client
 // =============================================================
 
 export class GeminiClient {
-  // `InstanceType<typeof GoogleGenAI>` is preferred when available; fall back to `any` for safety
-  private ai: InstanceType<typeof GoogleGenAI> | any;
+  private ai: ReturnType<typeof GoogleGenAI>;
   private circuitBreaker: CircuitBreaker;
   
   private readonly maxRetries = 3;
@@ -87,13 +86,12 @@ export class GeminiClient {
   private readonly defaultEmbedModel = 'text-embedding-004';
 
   constructor(opts?: { apiKey?: string }) {
-    // If the SDK constructor expects different shape, adapt here.
-    this.ai = new (GoogleGenAI as any)({ apiKey: opts?.apiKey });
+    this.ai = new GoogleGenAI({ apiKey: opts?.apiKey });
     this.circuitBreaker = new CircuitBreaker();
   }
 
   // -----------------------------------------------------------
-  // Enhanced Content Generation
+  //  Content Generation
   // -----------------------------------------------------------
 
   async generateWithNativeTools(
@@ -103,7 +101,7 @@ export class GeminiClient {
     return this.withRetry(async () => {
       const model = options.model ?? 'gemini-2.5-flash';
 
-      // Format messages with enhanced content types
+      // Format messages with  content types
       const contents = await this.formatMessages(conversationHistory, options);
 
       // Build comprehensive config
@@ -125,8 +123,7 @@ export class GeminiClient {
     timeoutMs?: number
   ): Promise<GenerateResponse> {
     const response = await this.withTimeout(
-      (this.ai as any).models.generateContent?.({ model, contents, config } as any) ??
-        (this.ai as any).models?.generate?.({ model, input: contents, config } as any),
+      this.ai.models.generateContent({ model, contents, config } as any),
       'Generate timeout',
       timeoutMs ?? this.defaultTimeout
     );
@@ -140,12 +137,8 @@ export class GeminiClient {
     config: any,
     timeoutMs?: number
   ): Promise<GenerateResponse> {
-    const streamSource =
-      (this.ai as any).models.generateContentStream?.({ model, contents, config } as any) ??
-      (this.ai as any).models?.stream?.({ model, input: contents, config } as any);
-
     const streamResp = await this.withTimeout(
-      Promise.resolve(streamSource),
+      this.ai.models.generateContentStream({ model, contents, config } as any),
       'Stream timeout',
       timeoutMs ?? this.defaultTimeout
     );
@@ -155,89 +148,68 @@ export class GeminiClient {
     const toolCalls: Array<{ name: string; args: Record<string, any> }> = [];
     const searchResults: any[] = [];
     const codeExecutionResults: any[] = [];
-    let usageMetadata: any = undefined;
+    let usageMetadata: any = null;
     let finishReason: string | undefined;
 
     try {
-      // If streamResp is async iterable
-      if (streamResp && typeof (streamResp as any)[Symbol.asyncIterator] === 'function') {
+      if (streamResp && typeof streamResp[Symbol.asyncIterator] === 'function') {
         for await (const chunk of streamResp) {
-          if (!chunk) continue;
+          // Extract text content
+          const text = chunk?.text ?? chunk?.delta ?? '';
+          if (text) {
+            fullText += text;
+          }
 
-          // Extract text content (support multiple possible shapes)
-          const textCandidates = [
-            chunk.text,
-            chunk.delta,
-            chunk.candidateText,
-            chunk?.candidates?.[0]?.content?.text,
-          ];
-          for (const t of textCandidates) {
-            if (typeof t === 'string' && t.length > 0) {
-              fullText += t;
-              break;
+          // Extract thinking content (new in Gemini 2.5)
+          if (chunk?.candidates?.[0]?.content?.parts) {
+            for (const part of chunk.candidates[0].content.parts) {
+              if (part.thought) {
+                thinking += part.thought;
+              }
             }
           }
 
-          // Extract thinking content (new in some Gemini shapes)
-          if (chunk?.candidates?.[0]?.content?.parts && Array.isArray(chunk.candidates[0].content.parts)) {
+          // Extract tool calls
+          if (chunk?.candidates?.[0]?.content?.parts) {
             for (const part of chunk.candidates[0].content.parts) {
-              if (part?.thought) thinking += String(part.thought);
-              if (part?.functionCall) {
+              if (part.functionCall) {
                 toolCalls.push({
                   name: part.functionCall.name,
-                  args: part.functionCall.args ?? {},
+                  args: part.functionCall.args || {},
                 });
               }
-              if (part?.executableCode || part?.codeExecutionResult) {
+            }
+          }
+
+          // Extract search grounding metadata
+          if (chunk?.candidates?.[0]?.groundingMetadata?.searchEntryPoint) {
+            searchResults.push(chunk.candidates[0].groundingMetadata);
+          }
+
+          // Extract code execution results
+          if (chunk?.candidates?.[0]?.content?.parts) {
+            for (const part of chunk.candidates[0].content.parts) {
+              if (part.executableCode || part.codeExecutionResult) {
                 codeExecutionResults.push({
                   code: part.executableCode,
                   result: part.codeExecutionResult,
                 });
               }
-              if (part?.text) {
-                fullText += part.text;
-              }
             }
           }
 
-          // Extract grounding metadata (search)
-          if (chunk?.candidates?.[0]?.groundingMetadata) {
-            searchResults.push(chunk.candidates[0].groundingMetadata);
-          }
-
-          // Capture usage metadata & finish reason if present
+          // Capture metadata from final chunk
           if (chunk?.usageMetadata) {
             usageMetadata = chunk.usageMetadata;
           }
+
           if (chunk?.candidates?.[0]?.finishReason) {
             finishReason = chunk.candidates[0].finishReason;
           }
         }
-      } else if (streamResp && Array.isArray(streamResp)) {
-        // Some SDKs return an array of chunks synchronously
-        for (const chunk of streamResp) {
-          const parsed = this.parseResponse(chunk);
-          if (parsed.text) fullText += parsed.text;
-          if (parsed.thinking) thinking += parsed.thinking;
-          if (parsed.toolCalls) toolCalls.push(...parsed.toolCalls);
-          if (parsed.searchResults) searchResults.push(...parsed.searchResults);
-          if (parsed.codeExecutionResults) codeExecutionResults.push(...parsed.codeExecutionResults);
-          if (parsed.usageMetadata) usageMetadata = parsed.usageMetadata;
-          if (parsed.finishReason) finishReason = parsed.finishReason;
-        }
-      } else {
-        // Not a recognized streaming shape; attempt to parse as single response
-        const parsed = this.parseResponse(streamResp);
-        fullText = parsed.text ?? fullText;
-        thinking = parsed.thinking ?? thinking;
-        if (parsed.toolCalls) toolCalls.push(...parsed.toolCalls);
-        if (parsed.searchResults) searchResults.push(...parsed.searchResults);
-        if (parsed.codeExecutionResults) codeExecutionResults.push(...parsed.codeExecutionResults);
-        usageMetadata = parsed.usageMetadata ?? usageMetadata;
-        finishReason = parsed.finishReason ?? finishReason;
       }
     } catch (e) {
-      console.error('[EnhancedGemini] Stream error:', e);
+      console.error('[Gemini] Stream error:', e);
     }
 
     return {
@@ -252,7 +224,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // Message Formatting with Enhanced Content
+  // Message Formatting with  Content
   // -----------------------------------------------------------
 
   private async formatMessages(
@@ -261,14 +233,13 @@ export class GeminiClient {
   ): Promise<any[]> {
     const contents: any[] = [];
 
-    for (let i = 0; i < history.length; i++) {
-      const msg = history[i];
+    for (const msg of history) {
       const parts: any[] = [];
 
-      // Handle system messages (convert to user instructions but specifically labeled)
+      // Handle system messages
       if (msg.role === 'system') {
         contents.push({
-          role: 'system',
+          role: 'user',
           parts: [{ text: `[System Instructions]\n${msg.content}` }],
         });
         continue;
@@ -291,8 +262,8 @@ export class GeminiClient {
         }
       }
 
-      // Add images from options only to the last message (if provided)
-      if (options.images && i === history.length - 1) {
+      // Add images from options (only for current message)
+      if (options.images && contents.length === history.length - 1) {
         for (const img of options.images) {
           parts.push({
             inlineData: {
@@ -325,7 +296,7 @@ export class GeminiClient {
       },
       
       // Generation parameters
-      temperature: typeof options.temperature === 'number' ? options.temperature : 0.7,
+      temperature: options.temperature ?? 0.7,
       topP: options.topP,
       topK: options.topK,
       maxOutputTokens: options.maxOutputTokens,
@@ -395,20 +366,19 @@ export class GeminiClient {
   private parseResponse(response: any): GenerateResponse {
     const result: GenerateResponse = { text: '' };
 
-    // Handle structured candidate responses
-    if (response?.candidates?.[0]?.content?.parts && Array.isArray(response.candidates[0].content.parts)) {
+    if (response?.candidates?.[0]?.content?.parts) {
       const parts = response.candidates[0].content.parts;
 
       // Extract text
       result.text = parts
-        .filter((p: any) => typeof p.text === 'string' && p.text.length > 0)
+        .filter((p: any) => p.text)
         .map((p: any) => p.text)
         .join('');
 
       // Extract thinking/thoughts
       const thoughts = parts.filter((p: any) => p.thought);
       if (thoughts.length > 0) {
-        result.thinking = thoughts.map((t: any) => String(t.thought)).join('\n');
+        result.thinking = thoughts.map((t: any) => t.thought).join('\n');
       }
 
       // Extract function calls
@@ -421,12 +391,9 @@ export class GeminiClient {
       }
 
       // Extract code execution results
-      const codeResults = parts.filter((p: any) => p.codeExecutionResult || p.executableCode);
+      const codeResults = parts.filter((p: any) => p.codeExecutionResult);
       if (codeResults.length > 0) {
-        result.codeExecutionResults = codeResults.map((cr: any) => ({
-          code: cr.executableCode,
-          result: cr.codeExecutionResult,
-        }));
+        result.codeExecutionResults = codeResults.map((cr: any) => cr.codeExecutionResult);
       }
 
       // Extract grounding metadata (search results)
@@ -437,9 +404,9 @@ export class GeminiClient {
       // Extract usage metadata
       if (response.usageMetadata) {
         result.usageMetadata = {
-          promptTokens: response.usageMetadata.promptTokenCount ?? response.usageMetadata.promptTokens,
-          candidatesTokens: response.usageMetadata.candidatesTokenCount ?? response.usageMetadata.candidatesTokens,
-          totalTokens: response.usageMetadata.totalTokenCount ?? response.usageMetadata.totalTokens,
+          promptTokens: response.usageMetadata.promptTokenCount,
+          candidatesTokens: response.usageMetadata.candidatesTokenCount,
+          totalTokens: response.usageMetadata.totalTokenCount,
         };
       }
 
@@ -448,25 +415,14 @@ export class GeminiClient {
         result.finishReason = response.candidates[0].finishReason;
       }
     } else if (typeof response?.text === 'string') {
-      // Fallback to simple text responses
       result.text = response.text;
-    } else if (response && typeof response === 'object') {
-      // Try to extract text from a few other common shapes
-      result.text = response?.outputText ?? response?.generatedText ?? '';
-      if (response?.usage) {
-        result.usageMetadata = {
-          promptTokens: response.usage.promptTokenCount ?? response.usage.promptTokens,
-          candidatesTokens: response.usage.candidatesTokenCount ?? response.usage.candidatesTokens,
-          totalTokens: response.usage.totalTokenCount ?? response.usage.totalTokens,
-        };
-      }
     }
 
     return result;
   }
 
   // -----------------------------------------------------------
-  // File Management (Enhanced)
+  // File Management ()
   // -----------------------------------------------------------
 
   async uploadFile(
@@ -478,55 +434,55 @@ export class GeminiClient {
       const buffer = Buffer.from(fileDataBase64, 'base64');
 
       const uploadResp: any = await this.withTimeout(
-        (this.ai as any).files?.upload?.({
+        this.ai.files.upload({
           file: buffer as any,
           config: { mimeType, displayName },
-        }) ??
-          (this.ai as any).files?.create?.({ file: buffer as any, config: { mimeType, displayName } }),
+        }),
         'Upload timeout',
         60000
       );
 
-      const name = uploadResp?.name ?? uploadResp?.fileName ?? uploadResp?.id;
-      if (!name) throw new Error('Upload failed: no file name/id returned');
+      const name = uploadResp?.name;
+      if (!name) throw new Error('Upload failed: no file name returned');
 
-      // Poll for processing status with a reasonable limit
-      let meta: any = await (this.ai as any).files?.get?.({ name }) ?? {};
+      // Wait for processing
+      let meta: any = await this.ai.files.get({ name });
       let attempts = 0;
       
-      while (meta?.state === 'PROCESSING' && attempts < 30) {
-        // 2 seconds per attempt => up to ~60 seconds total
+      while (meta.state === 'PROCESSING' && attempts < 30) {
         await new Promise(r => setTimeout(r, 2000));
-        meta = await (this.ai as any).files?.get?.({ name }) ?? meta;
+        meta = await this.ai.files.get({ name });
         attempts++;
       }
 
       return {
-        fileUri: meta?.uri ?? meta?.fileUri ?? name,
+        fileUri: meta?.uri,
         mimeType: meta?.mimeType ?? mimeType,
         name: meta?.displayName ?? displayName,
         sizeBytes: meta?.sizeBytes ?? buffer.length,
         uploadedAt: Date.now(),
         state: meta?.state ?? 'ACTIVE',
-        expiresAt: meta?.expirationTime ? new Date(meta.expirationTime).getTime() : undefined,
+        expiresAt: meta?.expirationTime
+          ? new Date(meta.expirationTime).getTime()
+          : undefined,
       };
     });
   }
 
   async listFiles(): Promise<FileMetadata[]> {
     try {
-      const response: any = await (this.ai as any).files?.list?.();
+      const response: any = await this.ai.files.list();
       return (response?.files || []).map((f: any) => ({
-        fileUri: f.uri ?? f.fileUri ?? f.name,
+        fileUri: f.uri,
         mimeType: f.mimeType,
-        name: f.displayName ?? f.name,
+        name: f.displayName,
         sizeBytes: f.sizeBytes,
-        uploadedAt: f.createTime ? new Date(f.createTime).getTime() : undefined,
+        uploadedAt: new Date(f.createTime).getTime(),
         state: f.state,
         expiresAt: f.expirationTime ? new Date(f.expirationTime).getTime() : undefined,
       }));
     } catch (e) {
-      console.error('[EnhancedGemini] List files error:', e);
+      console.error('[Gemini] List files error:', e);
       return [];
     }
   }
@@ -534,14 +490,14 @@ export class GeminiClient {
   async deleteFile(fileUriOrName: string): Promise<void> {
     try {
       const name = fileUriOrName.split('/').pop() ?? fileUriOrName;
-      await (this.ai as any).files?.delete?.({ name });
+      await this.ai.files.delete({ name });
     } catch (e) {
-      console.warn('[EnhancedGemini] Delete file failed:', e);
+      console.warn('[Gemini] Delete file failed:', e);
     }
   }
 
   // -----------------------------------------------------------
-  // Embeddings (unchanged from original, slightly hardened)
+  // Embeddings (unchanged from original)
   // -----------------------------------------------------------
 
   async embedText(
@@ -617,7 +573,7 @@ export class GeminiClient {
 
       throw new Error('No embedding API found on SDK');
     } catch (e) {
-      console.error('[EnhancedGemini] Embedding error:', e);
+      console.error('[Gemini] Embedding error:', e);
       throw e;
     }
   }
@@ -628,7 +584,7 @@ export class GeminiClient {
     if (resp?.embeddings && Array.isArray(resp.embeddings)) {
       for (const e of resp.embeddings) {
         if (Array.isArray(e?.values)) embeddings.push(e.values);
-        else if (Array.isArray(e)) embeddings.push(e as number[]);
+        else if (Array.isArray(e)) embeddings.push(e);
       }
     } else if (resp?.data && Array.isArray(resp.data)) {
       for (const d of resp.data) {
@@ -665,7 +621,7 @@ export class GeminiClient {
         return await this.circuitBreaker.execute(fn);
       } catch (err) {
         lastErr = err;
-        console.warn(`[dGemini] Attempt ${i + 1}/${this.maxRetries} failed:`, err);
+        console.warn(`[Gemini] Attempt ${i + 1}/${this.maxRetries} failed:`, err);
 
         if (i < this.maxRetries - 1) {
           const delay = this.baseBackoff * Math.pow(2, i);
@@ -678,17 +634,14 @@ export class GeminiClient {
   }
 
   private async withTimeout<T>(
-    promise: Promise<T> | T,
+    promise: Promise<T>,
     errorMsg = 'Timeout',
     ms?: number
   ): Promise<T> {
     const timeout = ms ?? this.defaultTimeout;
 
-    // Accept either a promise or direct value
-    const p = promise instanceof Promise ? promise : Promise.resolve(promise);
-
     return Promise.race([
-      p,
+      promise,
       new Promise<T>((_, reject) =>
         setTimeout(() => reject(new Error(errorMsg)), timeout)
       ),
