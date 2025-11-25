@@ -1,7 +1,6 @@
-// src/durable-agent-final.ts - Optimized with Gemini Best Practices
+// src/durable-agent.ts - FIXED VERSION
 
 import { DurableObject } from 'cloudflare:workers';
-import type { DurableObjectState } from '@cloudflare/workers-types';
 import type { Env, Message, Artifact, TaskEnvelope, WSOutgoingMessage } from './types';
 import { GeminiClient } from './gemini';
 import { DurableStorage } from './durable-storage';
@@ -16,7 +15,7 @@ import {
 } from './admin/admin-prompts';
 
 // =============================================================
-// Response Parsing (Simplified)
+// Response Parsing
 // =============================================================
 
 interface ParsedAdminResponse {
@@ -35,20 +34,19 @@ interface ParsedWorkerResponse {
 }
 
 // =============================================================
-// Final Orion Agent
+// Orion Agent - FIXED
 // =============================================================
 
 export class OrionAgent extends DurableObject {
   private storage: DurableStorage;
   private gemini: GeminiClient;
   private env: Env;
+  private state: any; // DurableObjectState
   private d1?: D1Manager;
   private memory?: MemoryManager;
   private sessionId?: string;
   private initialized = false;
   private activeSockets = new Set<WebSocket>();
-
-  // Cache system instruction (it's fixed)
   private adminSystemInstruction: string;
 
   private metrics = {
@@ -60,8 +58,9 @@ export class OrionAgent extends DurableObject {
     thinkingTokensUsed: 0,
   };
 
-  constructor(state: DurableObjectState, env: Env) {
+  constructor(state: any, env: Env) {
     super(state, env);
+    this.state = state; // Store state reference
     this.env = env;
     this.storage = new DurableStorage(state);
     this.gemini = new GeminiClient({ apiKey: env.GEMINI_API_KEY });
@@ -80,7 +79,7 @@ export class OrionAgent extends DurableObject {
   private async init(): Promise<void> {
     if (this.initialized) return;
 
-    console.log('[FinalOrion] Initializing with optimized prompts...');
+    console.log('[OrionAgent] Initializing...');
 
     if (this.env.DB) {
       this.d1 = new D1Manager(this.env.DB);
@@ -100,7 +99,7 @@ export class OrionAgent extends DurableObject {
     }
 
     this.initialized = true;
-    console.log('[FinalOrion] Ready');
+    console.log('[OrionAgent] Ready');
   }
 
   private async hydrateFromD1(): Promise<void> {
@@ -111,9 +110,9 @@ export class OrionAgent extends DurableObject {
       for (const msg of messages) {
         await this.storage.saveMessage(msg.role as any, msg.parts || [], msg.timestamp);
       }
-      console.log(`[FinalOrion] Hydrated ${messages.length} messages`);
+      console.log(`[OrionAgent] Hydrated ${messages.length} messages`);
     } catch (e) {
-      console.warn('[FinalOrion] Hydration failed:', e);
+      console.warn('[OrionAgent] Hydration failed:', e);
     }
   }
 
@@ -131,6 +130,7 @@ export class OrionAgent extends DurableObject {
                        undefined;
     }
 
+    // Handle WebSocket upgrade
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
       return this.handleWebSocketUpgrade(request);
@@ -187,13 +187,13 @@ export class OrionAgent extends DurableObject {
 
       return new Response('Not Found', { status: 404 });
     } catch (err: any) {
-      console.error('[FinalOrion] Request error:', err);
+      console.error('[OrionAgent] Request error:', err);
       return this.jsonResponse({ error: err.message }, 500);
     }
   }
 
   // =============================================================
-  // Admin Loop (Optimized)
+  // Admin Loop
   // =============================================================
 
   private async handleChatRequest(request: Request): Promise<Response> {
@@ -246,10 +246,23 @@ export class OrionAgent extends DurableObject {
     let turn = 0;
     const maxTurns = 10;
 
-    // Conversation history for context
-    const conversationHistory = this.formatContextForGemini(
-      this.storage.getMessages().slice(-10) // Last 10 messages for context
-    );
+    // Build conversation history (FIXED: proper format)
+    const conversationHistory: Array<{ role: string; content: string }> = [];
+    
+    // Add system instruction as first message
+    conversationHistory.push({
+      role: 'system',
+      content: this.adminSystemInstruction
+    });
+
+    // Add recent conversation context
+    const recentMessages = this.storage.getMessages().slice(-10);
+    for (const msg of recentMessages) {
+      conversationHistory.push({
+        role: msg.role === 'model' ? 'assistant' : 'user',
+        content: this.extractMessageContent(msg)
+      });
+    }
 
     while (turn < maxTurns) {
       turn++;
@@ -257,19 +270,25 @@ export class OrionAgent extends DurableObject {
 
       callbacks?.onStatus?.(`Processing (turn ${turn}/${maxTurns})...`);
 
-      // Build messages array: system instruction is separate
-      const messages = [
-        { role: 'system', content: this.adminSystemInstruction },
-        ...conversationHistory,
-        { role: 'user', content: turn === 1 ? userPrompt : 'Continue with your task.' },
-      ];
+      // Add current user message on first turn
+      if (turn === 1) {
+        conversationHistory.push({
+          role: 'user',
+          content: userPrompt
+        });
+      } else {
+        conversationHistory.push({
+          role: 'user',
+          content: 'Continue with your task.'
+        });
+      }
 
-      // Call Gemini with all native tools enabled
+      // Call Gemini with native tools
       const response = await this.gemini.generateWithNativeTools(
-        messages,
+        conversationHistory,
         {
-          stream: true,
-          temperature: 1.0, // Keep default as per Gemini 3 recommendations
+          stream: false, // Simplified for debugging
+          temperature: 1.0,
           thinkingConfig: {
             thinkingBudget: 8192,
             enableThinking: true,
@@ -313,6 +332,12 @@ export class OrionAgent extends DurableObject {
       // Parse response
       const parsed = this.parseAdminResponse(response.text, response);
 
+      // Add assistant response to history
+      conversationHistory.push({
+        role: 'assistant',
+        content: response.text
+      });
+
       // Handle actions
       switch (parsed.action) {
         case 'respond':
@@ -328,13 +353,11 @@ export class OrionAgent extends DurableObject {
           // Background D1 sync
           this.syncToD1().catch(console.warn);
           
-          console.log(`[FinalOrion] Completed in ${Date.now() - startTime}ms, ${turn} turns`);
+          console.log(`[OrionAgent] Completed in ${Date.now() - startTime}ms, ${turn} turns`);
           return { response: fullResponse, artifacts };
 
         case 'memory_search':
-          // Memory search
           callbacks?.onStatus?.('💾 Searching conversation memory...');
-          
           const memoryResults = await this.performMemorySearch(parsed.memoryQuery!);
           
           conversationHistory.push({
@@ -344,7 +367,6 @@ export class OrionAgent extends DurableObject {
           break;
 
         case 'delegate':
-          // Worker delegation
           if (!parsed.delegation) {
             conversationHistory.push({
               role: 'user',
@@ -389,23 +411,17 @@ Error: ${workerResult.error}
           });
           break;
       }
-
-      // Add assistant's response to history
-      conversationHistory.push({
-        role: 'assistant',
-        content: response.text,
-      });
     }
 
     // Max turns reached
-    const timeoutResponse = 'I reached my processing limit while working on your request. Let me summarize what I was able to accomplish so far...';
+    const timeoutResponse = 'I reached my processing limit. Let me provide what I have so far.';
     await this.saveMessage('model', timeoutResponse);
     
     return { response: timeoutResponse, artifacts };
   }
 
   // =============================================================
-  // Worker Loop (Optimized)
+  // Worker Loop
   // =============================================================
 
   private async executeWorkerLoop(
@@ -433,17 +449,8 @@ Error: ${workerResult.error}
       };
     }
 
-    this.metrics.totalDelegations++;
-
     callbacks?.onStatus?.(`Starting ${config.name}...`);
-    callbacks?.onWorkerProgress?.({
-      type: 'worker_started',
-      message: `${config.name} starting task`,
-      worker: envelope.workerType,
-      taskId: envelope.taskId,
-    });
 
-    // Build system instruction for worker
     const systemInstruction = buildWorkerSystemInstruction(envelope.workerType, {
       name: config.name,
       description: config.description,
@@ -451,7 +458,6 @@ Error: ${workerResult.error}
       outputFormat: envelope.expectedOutput.format,
     });
 
-    // Build task prompt
     const taskPrompt = buildWorkerTaskPrompt({
       objective: envelope.objective,
       context: envelope.context,
@@ -465,7 +471,10 @@ Error: ${workerResult.error}
     let turn = 0;
     const maxTurns = config.maxTurns || 8;
 
-    const workerHistory: Array<{ role: string; content: string }> = [];
+    const workerHistory: Array<{ role: string; content: string }> = [
+      { role: 'system', content: systemInstruction },
+      { role: 'user', content: taskPrompt }
+    ];
 
     while (turn < maxTurns) {
       turn++;
@@ -479,16 +488,8 @@ Error: ${workerResult.error}
         progress: Math.round((turn / maxTurns) * 100),
       });
 
-      // Build messages
-      const messages = [
-        { role: 'system', content: systemInstruction },
-        { role: 'user', content: turn === 1 ? taskPrompt : 'Continue with your task. Remember to output in the specified format when complete.' },
-        ...workerHistory,
-      ];
-
-      // Call Gemini
       const response = await this.gemini.generateWithNativeTools(
-        messages,
+        workerHistory,
         {
           stream: false,
           temperature: config.temperature || 0.7,
@@ -502,15 +503,17 @@ Error: ${workerResult.error}
         }
       );
 
-      // Track tools used
       if (response.searchResults) toolsUsed.push('web_search');
       if (response.codeExecutionResults) toolsUsed.push('code_execution');
 
-      // Parse worker response
       const parsed = this.parseWorkerResponse(response.text);
 
+      workerHistory.push({
+        role: 'assistant',
+        content: response.text
+      });
+
       if (parsed.complete && parsed.output) {
-        // Worker is done!
         const artifact = await this.createArtifact(
           envelope,
           parsed.output,
@@ -535,20 +538,16 @@ Error: ${workerResult.error}
         };
       }
 
-      // Not done yet - continue
-      workerHistory.push(
-        { role: 'assistant', content: response.text },
-        { role: 'user', content: '<instruction>Continue working on the task. Output your final deliverable when ready.</instruction>' }
-      );
+      workerHistory.push({
+        role: 'user',
+        content: '<instruction>Continue working on the task. Output your final deliverable when ready.</instruction>'
+      });
     }
-
-    // Max turns reached
-    console.warn(`[Worker:${config.type}] Max turns reached without completion`);
 
     return {
       success: false,
       summary: 'Task incomplete',
-      error: 'Worker exceeded maximum turns without completing task',
+      error: 'Worker exceeded maximum turns',
       toolsUsed: [...new Set(toolsUsed)],
       turnsUsed: turn,
     };
@@ -562,7 +561,6 @@ Error: ${workerResult.error}
     text: string,
     geminiResponse: any
   ): ParsedAdminResponse {
-    // Check for memory search (explicit)
     const memoryMatch = text.match(/\[MEMORY_SEARCH:\s*([^\]]+)\]/i);
     if (memoryMatch) {
       return {
@@ -572,7 +570,6 @@ Error: ${workerResult.error}
       };
     }
 
-    // Check for delegation (explicit)
     const delegateMatch = text.match(/<delegate>([\s\S]*?)<\/delegate>/);
     if (delegateMatch) {
       const delegation = this.parseDelegationXML(delegateMatch[1]);
@@ -581,22 +578,13 @@ Error: ${workerResult.error}
           action: 'delegate',
           content: text.replace(/<delegate>[\s\S]*?<\/delegate>/, '').trim(),
           delegation,
-          metadata: {
-            searchResults: geminiResponse.searchResults,
-            codeExecutionResults: geminiResponse.codeExecutionResults,
-          },
         };
       }
     }
 
-    // Default: direct response
     return {
       action: 'respond',
       content: text.trim(),
-      metadata: {
-        searchResults: geminiResponse.searchResults,
-        codeExecutionResults: geminiResponse.codeExecutionResults,
-      },
     };
   }
 
@@ -611,7 +599,6 @@ Error: ${workerResult.error}
       const objective = extract('objective');
 
       if (!workerType || !objective) {
-        console.warn('[FinalOrion] Invalid delegation - missing worker or objective');
         return null;
       }
 
@@ -626,47 +613,31 @@ Error: ${workerResult.error}
         qualityCriteria: extract('quality').split('\n').filter(Boolean),
       };
     } catch (e) {
-      console.error('[FinalOrion] Delegation XML parsing error:', e);
+      console.error('[OrionAgent] Delegation parsing error:', e);
       return null;
     }
   }
 
   private parseWorkerResponse(text: string): ParsedWorkerResponse {
-    // Look for OUTPUT section
     const outputMatch = text.match(/OUTPUT:\s*\n([\s\S]*?)(?:\n\nSUMMARY:|$)/i);
     if (outputMatch) {
       const output = outputMatch[1].trim();
-      
-      // Extract SUMMARY
       const summaryMatch = text.match(/SUMMARY:\s*([^\n]+)/i);
       const summary = summaryMatch ? summaryMatch[1].trim() : undefined;
       
-      // Extract CONFIDENCE
-      const confMatch = text.match(/CONFIDENCE:\s*(high|medium|low)/i);
-      const confidence = confMatch ? confMatch[1].toLowerCase() as any : undefined;
-
       return {
         output,
         summary,
-        confidence,
         complete: true,
       };
     }
 
-    // Not complete yet
     return { complete: false };
   }
 
   // =============================================================
   // Helper Methods
   // =============================================================
-
-  private formatContextForGemini(messages: Message[]): Array<{ role: string; content: string }> {
-    return messages.map(msg => ({
-      role: msg.role === 'model' ? 'assistant' : 'user',
-      content: this.extractMessageContent(msg),
-    }));
-  }
 
   private extractMessageContent(msg: Message): string {
     if (msg.content) return msg.content;
@@ -682,7 +653,7 @@ Error: ${workerResult.error}
 
   private async performMemorySearch(query: string): Promise<string> {
     if (!this.memory) {
-      return '<memory_error>Memory search not available - Vectorize not configured</memory_error>';
+      return '<memory_error>Memory search not available</memory_error>';
     }
     
     try {
@@ -729,9 +700,6 @@ Error: ${workerResult.error}
       content_writer: 'content',
       code_developer: 'code',
       report_generator: 'report',
-      seo_specialist: 'analysis',
-      editor: 'content',
-      synthesizer: 'content',
     };
 
     return {
@@ -767,7 +735,7 @@ Error: ${workerResult.error}
         await this.d1.saveArtifact(this.sessionId, artifact);
       }
     } catch (err) {
-      console.error('[FinalOrion] D1 sync failed:', err);
+      console.error('[OrionAgent] D1 sync failed:', err);
     }
   }
 
@@ -785,7 +753,8 @@ Error: ${workerResult.error}
       }
 
       const buffer = await file.arrayBuffer();
-      const base64 = Buffer.from(buffer).toString('base64');
+      const uint8Array = new Uint8Array(buffer);
+      const base64 = this.arrayBufferToBase64(uint8Array);
 
       const metadata = await this.gemini.uploadFile(
         base64,
@@ -804,25 +773,46 @@ Error: ${workerResult.error}
     return this.jsonResponse({ files });
   }
 
+  // Helper to convert ArrayBuffer to base64 (Cloudflare Workers compatible)
+  private arrayBufferToBase64(buffer: Uint8Array): string {
+    let binary = '';
+    const len = buffer.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(buffer[i]);
+    }
+    return btoa(binary);
+  }
+
   // =============================================================
-  // WebSocket (Simplified)
+  // WebSocket (FIXED)
   // =============================================================
 
   private handleWebSocketUpgrade(request: Request): Response {
+    // Create WebSocket pair
     const pair = new WebSocketPair();
-    const [client, server] = [pair[0], pair[1]];
+    const [client, server] = Object.values(pair);
 
-    this.ctx.acceptWebSocket(server);
+    // Accept the WebSocket connection
+    this.state.acceptWebSocket(server);
     this.activeSockets.add(server);
 
-    server.addEventListener('message', (event: MessageEvent) => {
-      this.handleWebSocketMessage(server, event.data).catch(console.error);
+    // Set up event handlers
+    server.addEventListener('message', async (event: MessageEvent) => {
+      await this.handleWebSocketMessage(server, event.data);
     });
 
-    server.addEventListener('close', () => this.activeSockets.delete(server));
-    server.addEventListener('error', () => this.activeSockets.delete(server));
+    server.addEventListener('close', () => {
+      this.activeSockets.delete(server);
+    });
 
-    return new Response(null, { status: 101, webSocket: client });
+    server.addEventListener('error', () => {
+      this.activeSockets.delete(server);
+    });
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
   }
 
   private async handleWebSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
@@ -830,12 +820,66 @@ Error: ${workerResult.error}
 
     try {
       const msg = JSON.parse(data);
+      
       if (msg.type === 'user_message' && msg.content) {
-        const result = await this.executeAdminLoop(msg.content, msg.images);
-        ws.send(JSON.stringify({ type: 'complete', content: result.response }));
+        // Execute admin loop with callbacks
+        const result = await this.executeAdminLoop(
+          msg.content,
+          msg.images,
+          {
+            onThought: (thought) => {
+              this.sendWebSocketMessage(ws, {
+                type: 'thinking',
+                message: thought
+              });
+            },
+            onStatus: (status) => {
+              this.sendWebSocketMessage(ws, {
+                type: 'status',
+                message: status
+              });
+            },
+            onChunk: (chunk) => {
+              this.sendWebSocketMessage(ws, {
+                type: 'chunk',
+                content: chunk
+              });
+            },
+            onArtifact: (artifact) => {
+              this.sendWebSocketMessage(ws, {
+                type: 'artifact',
+                artifact
+              });
+            },
+            onWorkerProgress: (event) => {
+              this.sendWebSocketMessage(ws, event);
+            }
+          }
+        );
+
+        // Send complete response
+        this.sendWebSocketMessage(ws, {
+          type: 'complete',
+          content: result.response,
+          artifacts: result.artifacts
+        });
       }
     } catch (e) {
-      console.error('[FinalOrion] WS error:', e);
+      console.error('[OrionAgent] WS error:', e);
+      this.sendWebSocketMessage(ws, {
+        type: 'error',
+        message: e instanceof Error ? e.message : 'Unknown error'
+      });
+    }
+  }
+
+  private sendWebSocketMessage(ws: WebSocket, message: any): void {
+    try {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(message));
+      }
+    } catch (e) {
+      console.error('[OrionAgent] Failed to send WS message:', e);
     }
   }
 
@@ -847,15 +891,12 @@ Error: ${workerResult.error}
     return {
       sessionId: this.sessionId,
       ...this.storage.getStatus(),
-      protocol: 'Optimized Gemini 2.5 with System Instructions',
-      promptingStrategy: 'XML-structured with few-shot examples',
+      protocol: 'Optimized Gemini 2.5',
       metrics: this.metrics,
       nativeTools: {
         googleSearch: true,
         googleMaps: true,
         codeExecution: true,
-        urlContext: true,
-        fileSearch: true,
         thinking: true,
       },
       memory: this.memory ? this.memory.getMetrics() : null,
