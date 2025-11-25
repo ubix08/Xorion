@@ -1,52 +1,34 @@
-// src/gemini-.ts -  Gemini Client with Full Native Capabilities
+// src/gemini.ts - FIXED VERSION
 
 import { GoogleGenAI } from '@google/genai';
 import type { FileMetadata } from './types';
 
 // =============================================================
-//  Types
+// Types
 // =============================================================
 
 export interface GenerateOptions {
   model?: string;
   stream?: boolean;
   timeoutMs?: number;
-  
-  // Thinking configuration
   thinkingConfig?: {
     thinkingBudget?: number;
     enableThinking?: boolean;
   };
-  
-  // Generation parameters
   temperature?: number;
   topP?: number;
   topK?: number;
   maxOutputTokens?: number;
-  
-  // Native Gemini tools
   useSearch?: boolean;
   useMaps?: boolean;
   useCodeExecution?: boolean;
-  useUrlContext?: string[];  // Array of URLs to ground with
+  useUrlContext?: string[];
   useFileSearch?: boolean;
-  
-  // Files and media
   files?: FileMetadata[];
   images?: Array<{ data: string; mimeType: string }>;
-  
-  // External tools (function calling)
   tools?: ToolDefinition[];
-  
-  // Response format
   responseMimeType?: 'text/plain' | 'application/json';
   responseSchema?: Record<string, any>;
-  
-  // Safety settings
-  safetySettings?: Array<{
-    category: string;
-    threshold: string;
-  }>;
 }
 
 export interface GenerateResponse {
@@ -73,7 +55,7 @@ export interface ToolDefinition {
 }
 
 // =============================================================
-//  Gemini Client
+// Gemini Client - FIXED
 // =============================================================
 
 export class GeminiClient {
@@ -82,7 +64,7 @@ export class GeminiClient {
   
   private readonly maxRetries = 3;
   private readonly baseBackoff = 1000;
-  private readonly defaultTimeout = 120000; // 2 minutes for complex queries
+  private readonly defaultTimeout = 120000;
   private readonly defaultEmbedModel = 'text-embedding-004';
 
   constructor(opts?: { apiKey?: string }) {
@@ -91,7 +73,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  //  Content Generation
+  // Content Generation - FIXED
   // -----------------------------------------------------------
 
   async generateWithNativeTools(
@@ -101,29 +83,83 @@ export class GeminiClient {
     return this.withRetry(async () => {
       const model = options.model ?? 'gemini-2.5-flash';
 
-      // Format messages with  content types
-      const contents = await this.formatMessages(conversationHistory, options);
+      // FIXED: Separate system message from conversation
+      let systemInstruction: string | undefined;
+      const contents: any[] = [];
 
-      // Build comprehensive config
+      for (const msg of conversationHistory) {
+        if (msg.role === 'system') {
+          // Extract system instruction
+          systemInstruction = msg.content;
+          continue;
+        }
+
+        const parts: any[] = [];
+
+        // Add text content
+        if (msg.content) {
+          parts.push({ text: msg.content });
+        }
+
+        // Add file attachments
+        if (msg.files) {
+          for (const file of msg.files) {
+            parts.push({
+              fileData: {
+                mimeType: file.mimeType,
+                fileUri: file.fileUri,
+              },
+            });
+          }
+        }
+
+        contents.push({
+          role: msg.role === 'assistant' ? 'model' : 'user',
+          parts,
+        });
+      }
+
+      // Add images to the last user message
+      if (options.images && contents.length > 0) {
+        const lastUserMsg = contents[contents.length - 1];
+        if (lastUserMsg.role === 'user') {
+          for (const img of options.images) {
+            lastUserMsg.parts.push({
+              inlineData: {
+                mimeType: img.mimeType,
+                data: img.data,
+              },
+            });
+          }
+        }
+      }
+
+      // Build config
       const config = this.buildConfig(options);
+
+      // Build request - FIXED: Include systemInstruction at top level
+      const request: any = {
+        model,
+        contents,
+        config,
+      };
+
+      if (systemInstruction) {
+        request.systemInstruction = { parts: [{ text: systemInstruction }] };
+      }
 
       // Execute with streaming support
       if (options.stream) {
-        return await this.streamGenerate(model, contents, config, options.timeoutMs);
+        return await this.streamGenerate(request, options.timeoutMs);
       } else {
-        return await this.generate(model, contents, config, options.timeoutMs);
+        return await this.generate(request, options.timeoutMs);
       }
     });
   }
 
-  private async generate(
-    model: string,
-    contents: any[],
-    config: any,
-    timeoutMs?: number
-  ): Promise<GenerateResponse> {
+  private async generate(request: any, timeoutMs?: number): Promise<GenerateResponse> {
     const response = await this.withTimeout(
-      this.ai.models.generateContent({ model, contents, config } as any),
+      this.ai.models.generateContent(request),
       'Generate timeout',
       timeoutMs ?? this.defaultTimeout
     );
@@ -131,14 +167,9 @@ export class GeminiClient {
     return this.parseResponse(response);
   }
 
-  private async streamGenerate(
-    model: string,
-    contents: any[],
-    config: any,
-    timeoutMs?: number
-  ): Promise<GenerateResponse> {
+  private async streamGenerate(request: any, timeoutMs?: number): Promise<GenerateResponse> {
     const streamResp = await this.withTimeout(
-      this.ai.models.generateContentStream({ model, contents, config } as any),
+      this.ai.models.generateContentStream(request),
       'Stream timeout',
       timeoutMs ?? this.defaultTimeout
     );
@@ -154,13 +185,13 @@ export class GeminiClient {
     try {
       if (streamResp && typeof streamResp[Symbol.asyncIterator] === 'function') {
         for await (const chunk of streamResp) {
-          // Extract text content
-          const text = chunk?.text ?? chunk?.delta ?? '';
+          // Extract text
+          const text = chunk?.text ?? '';
           if (text) {
             fullText += text;
           }
 
-          // Extract thinking content (new in Gemini 2.5)
+          // Extract thinking
           if (chunk?.candidates?.[0]?.content?.parts) {
             for (const part of chunk.candidates[0].content.parts) {
               if (part.thought) {
@@ -181,12 +212,12 @@ export class GeminiClient {
             }
           }
 
-          // Extract search grounding metadata
+          // Extract search results
           if (chunk?.candidates?.[0]?.groundingMetadata?.searchEntryPoint) {
             searchResults.push(chunk.candidates[0].groundingMetadata);
           }
 
-          // Extract code execution results
+          // Extract code execution
           if (chunk?.candidates?.[0]?.content?.parts) {
             for (const part of chunk.candidates[0].content.parts) {
               if (part.executableCode || part.codeExecutionResult) {
@@ -198,7 +229,6 @@ export class GeminiClient {
             }
           }
 
-          // Capture metadata from final chunk
           if (chunk?.usageMetadata) {
             usageMetadata = chunk.usageMetadata;
           }
@@ -224,110 +254,38 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // Message Formatting with  Content
-  // -----------------------------------------------------------
-
-  private async formatMessages(
-    history: Array<{ role: string; content: string; files?: FileMetadata[] }>,
-    options: GenerateOptions
-  ): Promise<any[]> {
-    const contents: any[] = [];
-
-    for (const msg of history) {
-      const parts: any[] = [];
-
-      // Handle system messages
-      if (msg.role === 'system') {
-        contents.push({
-          role: 'user',
-          parts: [{ text: `[System Instructions]\n${msg.content}` }],
-        });
-        continue;
-      }
-
-      // Add text content
-      if (msg.content) {
-        parts.push({ text: msg.content });
-      }
-
-      // Add file attachments (documents, images, etc.)
-      if (msg.files) {
-        for (const file of msg.files) {
-          parts.push({
-            fileData: {
-              mimeType: file.mimeType,
-              fileUri: file.fileUri,
-            },
-          });
-        }
-      }
-
-      // Add images from options (only for current message)
-      if (options.images && contents.length === history.length - 1) {
-        for (const img of options.images) {
-          parts.push({
-            inlineData: {
-              mimeType: img.mimeType,
-              data: img.data,
-            },
-          });
-        }
-      }
-
-      contents.push({
-        role: msg.role === 'model' || msg.role === 'assistant' ? 'model' : 'user',
-        parts,
-      });
-    }
-
-    return contents;
-  }
-
-  // -----------------------------------------------------------
   // Configuration Building
   // -----------------------------------------------------------
 
   private buildConfig(options: GenerateOptions): any {
     const config: any = {
-      // Thinking configuration (Gemini 2.5 feature)
       thinkingConfig: options.thinkingConfig ?? {
-        thinkingBudget: 8192, // Max thinking tokens
+        thinkingBudget: 8192,
         enableThinking: true,
       },
-      
-      // Generation parameters
-      temperature: options.temperature ?? 0.7,
+      temperature: options.temperature ?? 1.0,
       topP: options.topP,
       topK: options.topK,
       maxOutputTokens: options.maxOutputTokens,
-      
-      // Response format
       responseMimeType: options.responseMimeType,
       responseSchema: options.responseSchema,
-      
-      // Safety settings
-      safetySettings: options.safetySettings,
     };
 
     // Build tools array
     const tools: any[] = [];
 
-    // Google Search grounding
     if (options.useSearch) {
       tools.push({ googleSearch: {} });
     }
 
-    // Maps grounding
     if (options.useMaps) {
       tools.push({ googleMaps: {} });
     }
 
-    // Code execution
     if (options.useCodeExecution) {
       tools.push({ codeExecution: {} });
     }
 
-    // URL context grounding
     if (options.useUrlContext && options.useUrlContext.length > 0) {
       tools.push({
         urlContext: {
@@ -336,12 +294,10 @@ export class GeminiClient {
       });
     }
 
-    // File search (RAG over uploaded files)
     if (options.useFileSearch) {
       tools.push({ fileSearch: {} });
     }
 
-    // External function calling tools
     if (options.tools && options.tools.length > 0) {
       tools.push({
         functionDeclarations: options.tools.map(t => ({
@@ -375,7 +331,7 @@ export class GeminiClient {
         .map((p: any) => p.text)
         .join('');
 
-      // Extract thinking/thoughts
+      // Extract thinking
       const thoughts = parts.filter((p: any) => p.thought);
       if (thoughts.length > 0) {
         result.thinking = thoughts.map((t: any) => t.thought).join('\n');
@@ -390,18 +346,18 @@ export class GeminiClient {
         }));
       }
 
-      // Extract code execution results
+      // Extract code execution
       const codeResults = parts.filter((p: any) => p.codeExecutionResult);
       if (codeResults.length > 0) {
         result.codeExecutionResults = codeResults.map((cr: any) => cr.codeExecutionResult);
       }
 
-      // Extract grounding metadata (search results)
+      // Extract grounding metadata
       if (response.candidates[0].groundingMetadata) {
         result.searchResults = [response.candidates[0].groundingMetadata];
       }
 
-      // Extract usage metadata
+      // Extract usage
       if (response.usageMetadata) {
         result.usageMetadata = {
           promptTokens: response.usageMetadata.promptTokenCount,
@@ -410,7 +366,6 @@ export class GeminiClient {
         };
       }
 
-      // Extract finish reason
       if (response.candidates[0].finishReason) {
         result.finishReason = response.candidates[0].finishReason;
       }
@@ -422,7 +377,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // File Management ()
+  // File Management - FIXED
   // -----------------------------------------------------------
 
   async uploadFile(
@@ -431,11 +386,17 @@ export class GeminiClient {
     displayName: string
   ): Promise<FileMetadata> {
     return this.withRetry(async () => {
-      const buffer = Buffer.from(fileDataBase64, 'base64');
+      // FIXED: Convert base64 to Uint8Array for Cloudflare Workers
+      const binaryString = atob(fileDataBase64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
 
       const uploadResp: any = await this.withTimeout(
         this.ai.files.upload({
-          file: buffer as any,
+          file: bytes as any,
           config: { mimeType, displayName },
         }),
         'Upload timeout',
@@ -459,7 +420,7 @@ export class GeminiClient {
         fileUri: meta?.uri,
         mimeType: meta?.mimeType ?? mimeType,
         name: meta?.displayName ?? displayName,
-        sizeBytes: meta?.sizeBytes ?? buffer.length,
+        sizeBytes: meta?.sizeBytes ?? bytes.length,
         uploadedAt: Date.now(),
         state: meta?.state ?? 'ACTIVE',
         expiresAt: meta?.expirationTime
@@ -497,7 +458,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // Embeddings (unchanged from original)
+  // Embeddings
   // -----------------------------------------------------------
 
   async embedText(
@@ -554,16 +515,6 @@ export class GeminiClient {
       if (typeof (this.ai as any)?.models?.embedContent === 'function') {
         const resp = await this.withTimeout(
           (this.ai as any).models.embedContent({ model, input: clean }),
-          'Embed timeout',
-          timeoutMs ?? this.defaultTimeout
-        );
-
-        return this.extractEmbeddings(resp);
-      }
-
-      if (typeof (this.ai as any)?.embeddings?.create === 'function') {
-        const resp = await this.withTimeout(
-          (this.ai as any).embeddings.create({ model, input: clean }),
           'Embed timeout',
           timeoutMs ?? this.defaultTimeout
         );
@@ -654,7 +605,7 @@ export class GeminiClient {
 }
 
 // =============================================================
-// Circuit Breaker (unchanged)
+// Circuit Breaker
 // =============================================================
 
 class CircuitBreaker {
@@ -665,7 +616,7 @@ class CircuitBreaker {
 
   async execute<T>(fn: () => Promise<T>): Promise<T> {
     if (this.isOpen()) {
-      throw new Error('Circuit breaker open - too many recent failures');
+      throw new Error('Circuit breaker open');
     }
 
     try {
