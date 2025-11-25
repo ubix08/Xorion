@@ -32,27 +32,36 @@
             --radius-md: 12px;
             --radius-lg: 16px;
             --radius-full: 9999px;
+            --header-height: 64px;
+            --input-height: 80px;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
         }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
             background: var(--bg-secondary);
             color: var(--text-primary);
-            height: 100vh;
-            overflow: hidden;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
         }
 
-        /* Header */
+        /* FIXED: Header */
         .header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: var(--header-height);
             background: var(--bg-primary);
             border-bottom: 1px solid var(--border);
-            padding: 16px 20px;
+            padding: 0 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            position: relative;
             z-index: 100;
             box-shadow: var(--shadow-sm);
         }
@@ -121,11 +130,15 @@
             transform: scale(0.95);
         }
 
-        /* Main Layout */
+        /* FIXED: Main Layout */
         .main-container {
+            position: fixed;
+            top: var(--header-height);
+            left: 0;
+            right: 0;
+            bottom: 0;
             display: flex;
-            height: calc(100vh - 73px);
-            position: relative;
+            overflow: hidden;
         }
 
         /* Sidebar */
@@ -136,18 +149,18 @@
             display: flex;
             flex-direction: column;
             transition: transform 0.3s ease;
+            position: relative;
+            z-index: 90;
         }
 
         .sidebar.mobile-hidden {
             transform: translateX(-100%);
-            position: absolute;
-            height: 100%;
-            z-index: 90;
         }
 
         .sidebar-header {
             padding: 16px;
             border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
         }
 
         .btn-new-chat {
@@ -177,53 +190,21 @@
             padding: 8px;
         }
 
-        .session-item {
-            padding: 12px;
-            margin-bottom: 4px;
-            border-radius: var(--radius-md);
-            cursor: pointer;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-        }
-
-        .session-item:hover {
-            background: var(--bg-secondary);
-        }
-
-        .session-item.active {
-            background: var(--primary-light);
-            color: var(--primary);
-        }
-
-        .session-title {
-            flex: 1;
-            font-size: 14px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .session-time {
-            font-size: 11px;
-            color: var(--text-tertiary);
-        }
-
-        /* Chat Container */
+        /* FIXED: Chat Container */
         .chat-container {
             flex: 1;
             display: flex;
             flex-direction: column;
             background: var(--bg-secondary);
             position: relative;
+            overflow: hidden;
         }
 
-        /* Messages Area */
+        /* FIXED: Messages Area */
         .messages-area {
             flex: 1;
             overflow-y: auto;
+            overflow-x: hidden;
             padding: 20px;
             display: flex;
             flex-direction: column;
@@ -236,7 +217,7 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            height: 100%;
+            min-height: 100%;
             padding: 40px 20px;
             text-align: center;
         }
@@ -312,6 +293,18 @@
             display: flex;
             gap: 12px;
             max-width: 100%;
+            animation: slideInMessage 0.3s ease;
+        }
+
+        @keyframes slideInMessage {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .message.user {
@@ -343,6 +336,7 @@
         .message-content {
             flex: 1;
             max-width: calc(100% - 48px);
+            min-width: 0;
         }
 
         .message-bubble {
@@ -351,6 +345,7 @@
             font-size: 15px;
             line-height: 1.6;
             word-wrap: break-word;
+            overflow-wrap: break-word;
         }
 
         .message.user .message-bubble {
@@ -383,6 +378,7 @@
             font-size: 14px;
             color: var(--primary);
             margin: 8px 0;
+            animation: slideInMessage 0.3s ease;
         }
 
         .thinking-dots {
@@ -415,7 +411,8 @@
             background: var(--bg-tertiary);
             border-radius: var(--radius-full);
             font-size: 12px;
-            margin-top: 8px;
+            margin: 4px 0;
+            animation: slideInMessage 0.3s ease;
         }
 
         .status-badge.worker {
@@ -423,67 +420,14 @@
             color: var(--success);
         }
 
-        .status-icon {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: currentColor;
-        }
-
-        /* Artifact Card */
-        .artifact-card {
-            margin-top: 12px;
-            background: var(--bg-primary);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-md);
-            padding: 16px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .artifact-card:hover {
-            border-color: var(--primary);
-            box-shadow: var(--shadow-md);
-        }
-
-        .artifact-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 8px;
-        }
-
-        .artifact-icon {
-            width: 40px;
-            height: 40px;
-            background: var(--primary-light);
-            color: var(--primary);
-            border-radius: var(--radius-md);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-        }
-
-        .artifact-title {
-            flex: 1;
-            font-weight: 500;
-            font-size: 14px;
-        }
-
-        .artifact-type {
-            font-size: 11px;
-            color: var(--text-tertiary);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        /* Input Area */
+        /* FIXED: Input Area */
         .input-area {
+            position: relative;
             background: var(--bg-primary);
             border-top: 1px solid var(--border);
             padding: 16px 20px;
             box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+            flex-shrink: 0;
         }
 
         .input-container {
@@ -502,7 +446,7 @@
         #messageInput {
             width: 100%;
             min-height: 48px;
-            max-height: 200px;
+            max-height: 120px;
             padding: 12px 48px 12px 16px;
             background: var(--bg-secondary);
             border: 2px solid var(--border);
@@ -558,22 +502,6 @@
 
         .btn-send:active:not(:disabled) {
             transform: scale(0.95);
-        }
-
-        /* Progress Bar */
-        .progress-bar {
-            height: 3px;
-            background: var(--bg-tertiary);
-            border-radius: var(--radius-full);
-            overflow: hidden;
-            margin-top: 8px;
-        }
-
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, var(--primary), var(--success));
-            border-radius: var(--radius-full);
-            transition: width 0.3s ease;
         }
 
         /* Modal */
@@ -673,7 +601,7 @@
         /* Toast Notifications */
         .toast-container {
             position: fixed;
-            top: 20px;
+            top: 80px;
             right: 20px;
             z-index: 2000;
             display: flex;
@@ -747,8 +675,16 @@
             background: var(--text-tertiary);
         }
 
-        /* Mobile Responsiveness */
+        /* FIXED: Mobile Responsiveness */
         @media (max-width: 768px) {
+            :root {
+                --header-height: 56px;
+            }
+
+            .header {
+                padding: 0 16px;
+            }
+
             .header-title h1 {
                 font-size: 16px;
             }
@@ -758,8 +694,13 @@
             }
 
             .sidebar {
-                width: 100%;
-                max-width: 280px;
+                position: absolute;
+                top: 0;
+                left: 0;
+                bottom: 0;
+                width: 280px;
+                max-width: 80vw;
+                z-index: 95;
             }
 
             .messages-area {
@@ -787,18 +728,19 @@
             .toast-container {
                 left: 20px;
                 right: 20px;
+                top: 70px;
             }
 
             .toast {
                 min-width: auto;
             }
+
+            #messageInput {
+                max-height: 100px;
+            }
         }
 
         @media (max-width: 480px) {
-            .header {
-                padding: 12px 16px;
-            }
-
             .logo {
                 width: 32px;
                 height: 32px;
@@ -820,48 +762,6 @@
                 padding: 10px 14px;
                 font-size: 14px;
             }
-        }
-
-        /* Loading Animation */
-        .loading {
-            display: inline-block;
-            width: 16px;
-            height: 16px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            border-top-color: white;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        /* Connection Status */
-        .connection-status {
-            position: fixed;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: var(--error);
-            color: white;
-            padding: 12px 24px;
-            border-radius: var(--radius-full);
-            font-size: 14px;
-            font-weight: 500;
-            box-shadow: var(--shadow-lg);
-            z-index: 1000;
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.3s;
-        }
-
-        .connection-status.show {
-            opacity: 1;
-        }
-
-        .connection-status.connected {
-            background: var(--success);
         }
     </style>
 </head>
@@ -908,27 +808,26 @@
                 <div class="empty-state" id="emptyState">
                     <div class="empty-state-icon">🚀</div>
                     <h2>Welcome to Orion AI</h2>
-                    <p>Your intelligent multi-agent assistant. Ask me anything, and I'll coordinate specialist workers to help you.</p>
+                    <p>Your intelligent multi-agent assistant. Ask me anything!</p>
                     <div class="suggestions">
-                        <div class="suggestion-card" data-prompt="Research the latest trends in AI agent architectures and create a comprehensive report">
-                            <div class="suggestion-icon">🔍</div>
-                            <div class="suggestion-text">Research AI trends</div>
+                        <div class="suggestion-card" data-prompt="Tell me about yourself">
+                            <div class="suggestion-icon">👋</div>
+                            <div class="suggestion-text">Introduce yourself</div>
                         </div>
-                        <div class="suggestion-card" data-prompt="Analyze this data and create visualizations: Q1: $100k, Q2: $150k, Q3: $180k, Q4: $220k">
-                            <div class="suggestion-icon">📊</div>
-                            <div class="suggestion-text">Analyze data</div>
+                        <div class="suggestion-card" data-prompt="What can you help me with?">
+                            <div class="suggestion-icon">❓</div>
+                            <div class="suggestion-text">What can you do?</div>
                         </div>
-                        <div class="suggestion-card" data-prompt="Write a professional blog post about the future of work with AI">
+                        <div class="suggestion-card" data-prompt="Write a short story about AI">
                             <div class="suggestion-icon">✍️</div>
-                            <div class="suggestion-text">Write content</div>
+                            <div class="suggestion-text">Write a story</div>
                         </div>
-                        <div class="suggestion-card" data-prompt="Build a simple task management app with HTML, CSS, and JavaScript">
-                            <div class="suggestion-icon">💻</div>
-                            <div class="suggestion-text">Build an app</div>
+                        <div class="suggestion-card" data-prompt="Explain quantum computing">
+                            <div class="suggestion-icon">🔬</div>
+                            <div class="suggestion-text">Explain a topic</div>
                         </div>
                     </div>
                 </div>
-                <!-- Messages will be appended here -->
             </div>
 
             <!-- Input Area -->
@@ -997,17 +896,12 @@
     <!-- Toast Container -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <!-- Connection Status -->
-    <div class="connection-status" id="connectionStatus">
-        Connecting...
-    </div>
-
     <script>
-        // State Management
+        // FIXED: State Management
         const state = {
             ws: null,
             sessionId: null,
-            workerUrl: 'https://xorion.ubixsnow08.workers.dev',
+            workerUrl: 'http://localhost:8787',
             messages: [],
             isConnected: false,
             isProcessing: false,
@@ -1029,10 +923,8 @@
             emptyState: document.getElementById('emptyState'),
             messageInput: document.getElementById('messageInput'),
             sendBtn: document.getElementById('sendBtn'),
-            sessionsList: document.getElementById('sessionsList'),
             workerUrlInput: document.getElementById('workerUrl'),
             sessionIdInput: document.getElementById('sessionId'),
-            connectionStatus: document.getElementById('connectionStatus'),
             toastContainer: document.getElementById('toastContainer'),
         };
 
@@ -1063,21 +955,11 @@
         }
 
         function formatMessage(text) {
-            // Basic markdown-like formatting
             let formatted = escapeHtml(text);
-            
-            // Bold
             formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            
-            // Code blocks
-            formatted = formatted.replace(/```(.*?)```/gs, '<pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>');
-            
-            // Inline code
+            formatted = formatted.replace(/```([\s\S]*?)```/g, '<pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>');
             formatted = formatted.replace(/`(.*?)`/g, '<code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; font-size: 0.9em;">$1</code>');
-            
-            // Line breaks
             formatted = formatted.replace(/\n/g, '<br>');
-            
             return formatted;
         }
 
@@ -1091,8 +973,8 @@
             toast.innerHTML = `
                 <div class="toast-icon">${icon}</div>
                 <div class="toast-content">
-                    <div class="toast-title">${title}</div>
-                    <div class="toast-message">${message}</div>
+                    <div class="toast-title">${escapeHtml(title)}</div>
+                    <div class="toast-message">${escapeHtml(message)}</div>
                 </div>
             `;
             
@@ -1100,502 +982,3 @@
             
             setTimeout(() => {
                 toast.style.animation = 'slideIn 0.3s ease reverse';
-                setTimeout(() => toast.remove(), 300);
-            }, 3000);
-        }
-
-        // Connection Status
-        function updateConnectionStatus(connected) {
-            state.isConnected = connected;
-            elements.connectionStatus.textContent = connected ? 'Connected' : 'Disconnected';
-            elements.connectionStatus.className = `connection-status show ${connected ? 'connected' : ''}`;
-            
-            setTimeout(() => {
-                elements.connectionStatus.classList.remove('show');
-            }, 2000);
-        }
-
-        // WebSocket Connection
-        function connectWebSocket() {
-            const wsUrl = state.workerUrl.replace('http', 'ws') + `/api/chat?session_id=${state.sessionId}`;
-            
-            try {
-                state.ws = new WebSocket(wsUrl);
-                
-                state.ws.onopen = () => {
-                    console.log('WebSocket connected');
-                    updateConnectionStatus(true);
-                    showToast('Connected', 'WebSocket connection established', 'success');
-                };
-                
-                state.ws.onmessage = (event) => {
-                    handleWebSocketMessage(JSON.parse(event.data));
-                };
-                
-                state.ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    showToast('Connection Error', 'Failed to connect to Orion', 'error');
-                };
-                
-                state.ws.onclose = () => {
-                    console.log('WebSocket closed');
-                    updateConnectionStatus(false);
-                    state.ws = null;
-                    
-                    // Attempt reconnect after 3 seconds
-                    setTimeout(() => {
-                        if (!state.isConnected) {
-                            console.log('Attempting to reconnect...');
-                            connectWebSocket();
-                        }
-                    }, 3000);
-                };
-            } catch (error) {
-                console.error('Failed to create WebSocket:', error);
-                showToast('Connection Failed', error.message, 'error');
-            }
-        }
-
-        // Handle WebSocket Messages
-        function handleWebSocketMessage(message) {
-            console.log('Received:', message);
-            
-            switch (message.type) {
-                case 'thinking':
-                    showThinkingIndicator(message.message);
-                    break;
-                    
-                case 'status':
-                    updateStatusIndicator(message.message);
-                    break;
-                    
-                case 'worker_started':
-                    showWorkerStatus(message.message, message.worker, 'started');
-                    break;
-                    
-                case 'worker_progress':
-                    updateWorkerProgress(message.message, message.progress);
-                    break;
-                    
-                case 'worker_completed':
-                    showWorkerStatus(message.message, message.worker, 'completed');
-                    break;
-                    
-                case 'chunk':
-                    appendToCurrentMessage(message.content);
-                    break;
-                    
-                case 'artifact':
-                    showArtifact(message.artifact);
-                    break;
-                    
-                case 'complete':
-                    finalizeMessage(message.content);
-                    state.isProcessing = false;
-                    elements.sendBtn.disabled = false;
-                    break;
-                    
-                case 'error':
-                    showError(message.message);
-                    state.isProcessing = false;
-                    elements.sendBtn.disabled = false;
-                    break;
-            }
-        }
-
-        // Message Handling
-        function addMessage(role, content, timestamp = Date.now()) {
-            const message = { role, content, timestamp };
-            state.messages.push(message);
-            
-            // Hide empty state
-            if (elements.emptyState) {
-                elements.emptyState.style.display = 'none';
-            }
-            
-            const messageEl = document.createElement('div');
-            messageEl.className = `message ${role}`;
-            
-            const avatar = role === 'user' ? 'U' : 'O';
-            const avatarColor = role === 'user' ? 'var(--primary)' : 'linear-gradient(135deg, var(--primary) 0%, #0052CC 100%)';
-            
-            messageEl.innerHTML = `
-                <div class="message-avatar">${avatar}</div>
-                <div class="message-content">
-                    <div class="message-bubble" id="msg-${state.messages.length - 1}">
-                        ${formatMessage(content)}
-                    </div>
-                    <div class="message-time">${formatTime(timestamp)}</div>
-                </div>
-            `;
-            
-            elements.messagesArea.appendChild(messageEl);
-            scrollToBottom();
-            
-            return messageEl;
-        }
-
-        function showThinkingIndicator(text) {
-            // Remove existing thinking indicator
-            const existing = document.querySelector('.thinking-indicator');
-            if (existing) existing.remove();
-            
-            state.currentThinking = document.createElement('div');
-            state.currentThinking.className = 'thinking-indicator';
-            state.currentThinking.innerHTML = `
-                <div class="thinking-dots">
-                    <div class="thinking-dot"></div>
-                    <div class="thinking-dot"></div>
-                    <div class="thinking-dot"></div>
-                </div>
-                <span>${escapeHtml(text)}</span>
-            `;
-            
-            elements.messagesArea.appendChild(state.currentThinking);
-            scrollToBottom();
-        }
-
-        function updateStatusIndicator(text) {
-            if (state.currentStatus) {
-                state.currentStatus.querySelector('span').textContent = text;
-            } else {
-                state.currentStatus = document.createElement('div');
-                state.currentStatus.className = 'status-badge';
-                state.currentStatus.innerHTML = `
-                    <div class="status-icon"></div>
-                    <span>${escapeHtml(text)}</span>
-                `;
-                elements.messagesArea.appendChild(state.currentStatus);
-            }
-            scrollToBottom();
-        }
-
-        function showWorkerStatus(message, worker, status) {
-            const badge = document.createElement('div');
-            badge.className = `status-badge worker`;
-            
-            const emoji = status === 'started' ? '🚀' : '✅';
-            badge.innerHTML = `
-                <span>${emoji}</span>
-                <span>${escapeHtml(message)}</span>
-            `;
-            
-            elements.messagesArea.appendChild(badge);
-            scrollToBottom();
-        }
-
-        function updateWorkerProgress(message, progress) {
-            let progressEl = document.querySelector('.worker-progress');
-            
-            if (!progressEl) {
-                progressEl = document.createElement('div');
-                progressEl.className = 'status-badge worker worker-progress';
-                progressEl.innerHTML = `
-                    <span>⏳</span>
-                    <span class="progress-text">${escapeHtml(message)}</span>
-                    <div class="progress-bar" style="width: 100px; margin-left: 8px;">
-                        <div class="progress-fill" style="width: ${progress}%"></div>
-                    </div>
-                `;
-                elements.messagesArea.appendChild(progressEl);
-            } else {
-                progressEl.querySelector('.progress-text').textContent = message;
-                progressEl.querySelector('.progress-fill').style.width = `${progress}%`;
-            }
-            
-            scrollToBottom();
-        }
-
-        function appendToCurrentMessage(chunk) {
-            // Find or create current assistant message
-            let currentMsg = document.querySelector('.message.assistant:last-child .message-bubble');
-            
-            if (!currentMsg) {
-                const msgEl = addMessage('assistant', '', Date.now());
-                currentMsg = msgEl.querySelector('.message-bubble');
-            }
-            
-            currentMsg.innerHTML += escapeHtml(chunk);
-            scrollToBottom();
-        }
-
-        function finalizeMessage(content) {
-            // Remove thinking/status indicators
-            if (state.currentThinking) {
-                state.currentThinking.remove();
-                state.currentThinking = null;
-            }
-            if (state.currentStatus) {
-                state.currentStatus.remove();
-                state.currentStatus = null;
-            }
-            
-            const progressEl = document.querySelector('.worker-progress');
-            if (progressEl) progressEl.remove();
-            
-            // Check if we need to add a new message or update existing
-            const lastMsg = document.querySelector('.message.assistant:last-child .message-bubble');
-            if (lastMsg && !lastMsg.textContent.trim()) {
-                lastMsg.innerHTML = formatMessage(content);
-            } else if (!lastMsg) {
-                addMessage('assistant', content, Date.now());
-            }
-        }
-
-        function showArtifact(artifact) {
-            const artifactEl = document.createElement('div');
-            artifactEl.className = 'artifact-card';
-            
-            const icons = {
-                research: '🔍',
-                analysis: '📊',
-                content: '✍️',
-                code: '💻',
-                report: '📄',
-            };
-            
-            artifactEl.innerHTML = `
-                <div class="artifact-header">
-                    <div class="artifact-icon">${icons[artifact.type] || '📦'}</div>
-                    <div style="flex: 1;">
-                        <div class="artifact-title">${escapeHtml(artifact.title)}</div>
-                        <div class="artifact-type">${artifact.type}</div>
-                    </div>
-                </div>
-            `;
-            
-            artifactEl.addEventListener('click', () => {
-                showArtifactModal(artifact);
-            });
-            
-            elements.messagesArea.appendChild(artifactEl);
-            scrollToBottom();
-        }
-
-        function showArtifactModal(artifact) {
-            const modal = document.createElement('div');
-            modal.className = 'modal-overlay active';
-            modal.innerHTML = `
-                <div class="modal">
-                    <div class="modal-header">
-                        <h2 class="modal-title">${escapeHtml(artifact.title)}</h2>
-                        <button class="btn-icon close-artifact">
-                            <span>✕</span>
-                        </button>
-                    </div>
-                    <div class="modal-body">
-                        <div style="margin-bottom: 16px;">
-                            <strong>Type:</strong> ${artifact.type}<br>
-                            <strong>Created:</strong> ${new Date(artifact.createdAt).toLocaleString()}<br>
-                            <strong>Worker:</strong> ${artifact.workerType}
-                        </div>
-                        <div style="background: var(--bg-secondary); padding: 16px; border-radius: 8px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 13px;">
-${escapeHtml(artifact.content)}
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-secondary close-artifact">Close</button>
-                        <button class="btn btn-primary copy-artifact">Copy Content</button>
-                    </div>
-                </div>
-            `;
-            
-            document.body.appendChild(modal);
-            
-            modal.querySelectorAll('.close-artifact').forEach(btn => {
-                btn.addEventListener('click', () => modal.remove());
-            });
-            
-            modal.querySelector('.copy-artifact').addEventListener('click', () => {
-                navigator.clipboard.writeText(artifact.content);
-                showToast('Copied', 'Artifact content copied to clipboard', 'success');
-            });
-            
-            modal.addEventListener('click', (e) => {
-                if (e.target === modal) modal.remove();
-            });
-        }
-
-        function showError(message) {
-            const errorEl = document.createElement('div');
-            errorEl.style.cssText = 'padding: 12px 16px; background: rgba(239, 68, 68, 0.1); border-left: 4px solid var(--error); border-radius: 8px; color: var(--error); margin: 8px 0;';
-            errorEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(message)}`;
-            
-            elements.messagesArea.appendChild(errorEl);
-            scrollToBottom();
-        }
-
-        function scrollToBottom() {
-            elements.messagesArea.scrollTop = elements.messagesArea.scrollHeight;
-        }
-
-        // Send Message
-        async function sendMessage(content) {
-            if (!content.trim() || state.isProcessing) return;
-            
-            state.isProcessing = true;
-            elements.sendBtn.disabled = true;
-            
-            // Add user message
-            addMessage('user', content, Date.now());
-            
-            // Clear input
-            elements.messageInput.value = '';
-            elements.messageInput.style.height = 'auto';
-            
-            // Send via WebSocket if connected, otherwise use HTTP
-            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-                state.ws.send(JSON.stringify({
-                    type: 'user_message',
-                    content: content,
-                }));
-            } else {
-                // Fallback to HTTP
-                try {
-                    const response = await fetch(`${state.workerUrl}/api/chat?session_id=${state.sessionId}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ message: content }),
-                    });
-                    
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    
-                    const data = await response.json();
-                    addMessage('assistant', data.response, Date.now());
-                    
-                    if (data.artifacts && data.artifacts.length > 0) {
-                        data.artifacts.forEach(artifact => showArtifact(artifact));
-                    }
-                } catch (error) {
-                    showError(error.message);
-                } finally {
-                    state.isProcessing = false;
-                    elements.sendBtn.disabled = false;
-                }
-            }
-        }
-
-        // Event Listeners
-        elements.toggleSidebar.addEventListener('click', () => {
-            elements.sidebar.classList.toggle('mobile-hidden');
-        });
-
-        elements.newChatBtn.addEventListener('click', () => {
-            if (confirm('Start a new chat? Current conversation will be saved.')) {
-                state.sessionId = generateUUID();
-                state.messages = [];
-                elements.messagesArea.innerHTML = '';
-                elements.emptyState.style.display = 'flex';
-                elements.sessionIdInput.value = state.sessionId;
-                
-                // Reconnect WebSocket
-                if (state.ws) state.ws.close();
-                connectWebSocket();
-                
-                showToast('New Chat', 'Started a new conversation', 'success');
-            }
-        });
-
-        elements.settingsBtn.addEventListener('click', () => {
-            elements.settingsModal.classList.add('active');
-        });
-
-        elements.closeSettings.addEventListener('click', () => {
-            elements.settingsModal.classList.remove('active');
-        });
-
-        elements.saveSettings.addEventListener('click', () => {
-            state.workerUrl = elements.workerUrlInput.value;
-            localStorage.setItem('orion_worker_url', state.workerUrl);
-            
-            // Reconnect
-            if (state.ws) state.ws.close();
-            connectWebSocket();
-            
-            elements.settingsModal.classList.remove('active');
-            showToast('Settings Saved', 'Reconnecting to worker...', 'success');
-        });
-
-        elements.clearSession.addEventListener('click', async () => {
-            if (!confirm('Clear all session data? This cannot be undone.')) return;
-            
-            try {
-                await fetch(`${state.workerUrl}/api/clear?session_id=${state.sessionId}`, {
-                    method: 'POST',
-                });
-                
-                state.messages = [];
-                elements.messagesArea.innerHTML = '';
-                elements.emptyState.style.display = 'flex';
-                
-                showToast('Session Cleared', 'All data has been cleared', 'success');
-                elements.settingsModal.classList.remove('active');
-            } catch (error) {
-                showToast('Error', 'Failed to clear session', 'error');
-            }
-        });
-
-        elements.messageInput.addEventListener('input', function() {
-            this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 200) + 'px';
-        });
-
-        elements.messageInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage(elements.messageInput.value);
-            }
-        });
-
-        elements.sendBtn.addEventListener('click', () => {
-            sendMessage(elements.messageInput.value);
-        });
-
-        // Suggestion cards
-        document.querySelectorAll('.suggestion-card').forEach(card => {
-            card.addEventListener('click', () => {
-                const prompt = card.dataset.prompt;
-                elements.messageInput.value = prompt;
-                sendMessage(prompt);
-            });
-        });
-
-        // Close modal on overlay click
-        elements.settingsModal.addEventListener('click', (e) => {
-            if (e.target === elements.settingsModal) {
-                elements.settingsModal.classList.remove('active');
-            }
-        });
-
-        // Initialize
-        function init() {
-            // Load settings from localStorage
-            const savedUrl = localStorage.getItem('orion_worker_url');
-            if (savedUrl) {
-                state.workerUrl = savedUrl;
-                elements.workerUrlInput.value = savedUrl;
-            }
-            
-            // Generate or load session ID
-            state.sessionId = localStorage.getItem('orion_session_id') || generateUUID();
-            localStorage.setItem('orion_session_id', state.sessionId);
-            elements.sessionIdInput.value = state.sessionId;
-            
-            // Connect WebSocket
-            connectWebSocket();
-            
-            // Mobile: close sidebar on chat start
-            if (window.innerWidth <= 768) {
-                elements.sidebar.classList.add('mobile-hidden');
-            }
-            
-            console.log('Orion Chat UI initialized');
-            console.log('Session ID:', state.sessionId);
-            console.log('Worker URL:', state.workerUrl);
-        }
-
-        // Start the app
-        init();
-    </script>
-</body>
-</html>
