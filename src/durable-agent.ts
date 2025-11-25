@@ -3,7 +3,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectState } from '@cloudflare/workers-types';
 import type { Env, Message, Artifact, TaskEnvelope, WSOutgoingMessage } from './types';
-import { GeminiClient } from './gemini-enhanced';
+import { GeminiClient } from './gemini';
 import { DurableStorage } from './durable-storage';
 import { D1Manager } from './storage/d1-manager';
 import { MemoryManager } from './memory/memory-manager';
