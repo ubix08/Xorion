@@ -31,27 +31,7 @@ binding = "DB"
 database_name = "orinx-db"
 database_id = "7d31bd26-9b8d-48ef-903b-b0000af23af2"
 
-# -------------------------------------------------
-# Environment Variables
-# -------------------------------------------------
-#[vars]
-#GEMINI_API_KEY = ""
 
 [[vectorize]]
 binding = "VECTORIZE" # available in your Worker on env.VECTORIZE
 index_name = "memory-index"
-
-# -------------------------------------------------
-# Optional: Authentication secrets (set via wrangler secret put)
-# Uncomment and set these for authentication:
-# -------------------------------------------------
-# To set secrets, run:
-# wrangler secret put JWT_SECRET
-# wrangler secret put ADMIN_GMAIL
-# wrangler secret put ADMIN_PASSWORD_HASH
-
-# -------------------------------------------------
-# Routes (optional - uncomment if you have a custom domain)
-# -------------------------------------------------
-#[[routes]]
-#pattern = "orinx.rachidhakim265-b4e.workers.dev/api/*"
