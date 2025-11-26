@@ -1,4 +1,4 @@
-// src/gemini-.ts -  Gemini Client with Full Native Capabilities
+// src/gemini.ts - Gemini Client with Full Native Capabilities and Real-Time Streaming
 
 import { GoogleGenAI } from '@google/genai';
 import type { FileMetadata } from './types';
@@ -91,17 +91,19 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  //  Content Generation
+  //  Content Generation with Real-Time Streaming
   // -----------------------------------------------------------
 
   async generateWithNativeTools(
     conversationHistory: Array<{ role: string; content: string; files?: FileMetadata[] }>,
-    options: GenerateOptions = {}
+    options: GenerateOptions = {},
+    onChunk?: (chunk: string) => void,
+    onThinking?: (thought: string) => void
   ): Promise<GenerateResponse> {
     return this.withRetry(async () => {
       const model = options.model ?? 'gemini-2.5-flash';
 
-      // Format messages with  content types
+      // Format messages with content types
       const contents = await this.formatMessages(conversationHistory, options);
 
       // Build comprehensive config
@@ -109,7 +111,7 @@ export class GeminiClient {
 
       // Execute with streaming support
       if (options.stream) {
-        return await this.streamGenerate(model, contents, config, options.timeoutMs);
+        return await this.streamGenerate(model, contents, config, options.timeoutMs, onChunk, onThinking);
       } else {
         return await this.generate(model, contents, config, options.timeoutMs);
       }
@@ -135,7 +137,9 @@ export class GeminiClient {
     model: string,
     contents: any[],
     config: any,
-    timeoutMs?: number
+    timeoutMs?: number,
+    onChunk?: (chunk: string) => void,
+    onThinking?: (thought: string) => void
   ): Promise<GenerateResponse> {
     const streamResp = await this.withTimeout(
       this.ai.models.generateContentStream({ model, contents, config } as any),
@@ -154,17 +158,26 @@ export class GeminiClient {
     try {
       if (streamResp && typeof streamResp[Symbol.asyncIterator] === 'function') {
         for await (const chunk of streamResp) {
-          // Extract text content
+          // Extract and stream text content in real-time
           const text = chunk?.text ?? chunk?.delta ?? '';
           if (text) {
             fullText += text;
+            // ✅ Stream chunks immediately to frontend
+            if (onChunk) {
+              onChunk(text);
+            }
           }
 
-          // Extract thinking content (new in Gemini 2.5)
+          // Extract and stream thinking content (new in Gemini 2.5)
           if (chunk?.candidates?.[0]?.content?.parts) {
             for (const part of chunk.candidates[0].content.parts) {
               if (part.thought) {
-                thinking += part.thought;
+                const thoughtChunk = part.thought;
+                thinking += thoughtChunk;
+                // ✅ Stream thinking immediately to frontend
+                if (onThinking) {
+                  onThinking(thoughtChunk);
+                }
               }
             }
           }
@@ -224,7 +237,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // Message Formatting with  Content
+  // Message Formatting with Content
   // -----------------------------------------------------------
 
   private async formatMessages(
@@ -422,7 +435,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // File Management ()
+  // File Management
   // -----------------------------------------------------------
 
   async uploadFile(
@@ -497,7 +510,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // Embeddings (unchanged from original)
+  // Embeddings
   // -----------------------------------------------------------
 
   async embedText(
@@ -654,7 +667,7 @@ export class GeminiClient {
 }
 
 // =============================================================
-// Circuit Breaker (unchanged)
+// Circuit Breaker
 // =============================================================
 
 class CircuitBreaker {
