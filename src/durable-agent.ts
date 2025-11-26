@@ -1,7 +1,20 @@
-// src/durable-agent.ts - FIXED VERSION
+// src/durable-agent.ts - Complete Fixed Implementation with RPC and Hibernatable WebSockets
 
 import { DurableObject } from 'cloudflare:workers';
-import type { Env, Message, Artifact, TaskEnvelope, WSOutgoingMessage } from './types';
+import type { DurableObjectState } from '@cloudflare/workers-types';
+import type { 
+  Env, 
+  Message, 
+  Artifact, 
+  TaskEnvelope, 
+  WSOutgoingMessage,
+  WSIncomingMessage,
+  OrionRPC,
+  ChatResponse,
+  StatusResponse,
+  FileMetadata,
+  WorkerType
+} from './types';
 import { GeminiClient } from './gemini';
 import { DurableStorage } from './durable-storage';
 import { D1Manager } from './storage/d1-manager';
@@ -14,9 +27,9 @@ import {
   buildWorkerTaskPrompt,
 } from './admin/admin-prompts';
 
-// =============================================================
-// Response Parsing
-// =============================================================
+// =============================================================================
+// Response Parsing Interfaces
+// =============================================================================
 
 interface ParsedAdminResponse {
   action: 'respond' | 'memory_search' | 'delegate';
@@ -33,20 +46,21 @@ interface ParsedWorkerResponse {
   complete: boolean;
 }
 
-// =============================================================
-// Orion Agent - FIXED
-// =============================================================
+// =============================================================================
+// Orion Agent - Fixed Implementation with RPC and Hibernatable WebSockets
+// =============================================================================
 
-export class OrionAgent extends DurableObject {
+export class OrionAgent extends DurableObject implements OrionRPC {
+  private state: DurableObjectState;
   private storage: DurableStorage;
   private gemini: GeminiClient;
   private env: Env;
-  private state: any; // DurableObjectState
   private d1?: D1Manager;
   private memory?: MemoryManager;
   private sessionId?: string;
   private initialized = false;
-  private activeSockets = new Set<WebSocket>();
+
+  // Cache system instruction (it's fixed)
   private adminSystemInstruction: string;
 
   private metrics = {
@@ -58,28 +72,29 @@ export class OrionAgent extends DurableObject {
     thinkingTokensUsed: 0,
   };
 
-  constructor(state: any, env: Env) {
+  constructor(state: DurableObjectState, env: Env) {
     super(state, env);
-    this.state = state; // Store state reference
+    this.state = state;
     this.env = env;
     this.storage = new DurableStorage(state);
     this.gemini = new GeminiClient({ apiKey: env.GEMINI_API_KEY });
     this.adminSystemInstruction = buildAdminSystemInstruction();
 
-    const name = state.id?.name;
+    // Extract session ID from Durable Object name
+    const name = state.id.name;
     if (name?.startsWith('session:')) {
       this.sessionId = name.slice(8);
     }
   }
 
-  // =============================================================
+  // ===========================================================================
   // Initialization
-  // =============================================================
+  // ===========================================================================
 
   private async init(): Promise<void> {
     if (this.initialized) return;
 
-    console.log('[OrionAgent] Initializing...');
+    console.log(`[Orion:${this.sessionId}] Initializing...`);
 
     if (this.env.DB) {
       this.d1 = new D1Manager(this.env.DB);
@@ -94,12 +109,13 @@ export class OrionAgent extends DurableObject {
       );
     }
 
+    // Hydrate from D1 if needed
     if (this.sessionId && this.d1 && this.storage.getMessages().length === 0) {
       await this.hydrateFromD1();
     }
 
     this.initialized = true;
-    console.log('[OrionAgent] Ready');
+    console.log(`[Orion:${this.sessionId}] Ready`);
   }
 
   private async hydrateFromD1(): Promise<void> {
@@ -108,108 +124,292 @@ export class OrionAgent extends DurableObject {
     try {
       const messages = await this.d1.loadMessages(this.sessionId, 100);
       for (const msg of messages) {
-        await this.storage.saveMessage(msg.role as any, msg.parts || [], msg.timestamp);
+        await this.storage.saveMessage(
+          msg.role as 'user' | 'model',
+          msg.parts || [],
+          msg.timestamp
+        );
       }
-      console.log(`[OrionAgent] Hydrated ${messages.length} messages`);
+      console.log(`[Orion:${this.sessionId}] Hydrated ${messages.length} messages`);
     } catch (e) {
-      console.warn('[OrionAgent] Hydration failed:', e);
+      console.warn(`[Orion:${this.sessionId}] Hydration failed:`, e);
     }
   }
 
-  // =============================================================
-  // HTTP Handler
-  // =============================================================
+  // ===========================================================================
+  // RPC Methods (Type-safe API)
+  // ===========================================================================
 
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname;
+  async chat(
+    message: string,
+    images?: Array<{ data: string; mimeType: string }>
+  ): Promise<ChatResponse> {
+    await this.init();
 
-    if (!this.sessionId) {
-      this.sessionId = request.headers.get('X-Session-ID') || 
-                       url.searchParams.get('session_id') || 
-                       undefined;
+    if (!message?.trim()) {
+      throw new Error('Message cannot be empty');
     }
 
-    // Handle WebSocket upgrade
+    const result = await this.executeAdminLoop(message, images);
+
+    return {
+      id: `artifact_${envelope.taskId}_${Date.now()}`,
+      type: typeMap[workerType] || 'content',
+      title: envelope.objective.substring(0, 100),
+      content,
+      workerType,
+      createdAt: Date.now(),
+      metadata: {
+        taskId: envelope.taskId,
+        format: envelope.expectedOutput.format,
+      },
+    };
+  }
+
+  private async syncToD1(): Promise<void> {
+    if (!this.d1 || !this.sessionId) return;
+
+    try {
+      const messages = this.storage.getMessages();
+      if (messages.length === 0) return;
+
+      const latestInD1 = await this.d1.getLatestMessageTimestamp(this.sessionId);
+      const newMessages = messages.filter((m) => (m.timestamp || 0) > latestInD1);
+
+      if (newMessages.length > 0) {
+        await this.d1.saveMessages(this.sessionId, newMessages);
+      }
+
+      const artifacts = this.storage.getArtifacts();
+      for (const artifact of artifacts) {
+        await this.d1.saveArtifact(this.sessionId, artifact);
+      }
+    } catch (err) {
+      console.error(`[Orion:${this.sessionId}] D1 sync failed:`, err);
+    }
+  }
+}
+
+export default OrionAgent;
+      response: result.response,
+      artifacts: result.artifacts,
+      metadata: {
+        turnsUsed: result.turnsUsed || 0,
+        toolsUsed: result.toolsUsed || [],
+        thinkingTokens: result.thinkingTokens,
+      },
+    };
+  }
+
+  async getHistory(): Promise<{ messages: Message[] }> {
+    await this.init();
+    return { messages: this.storage.getMessages() };
+  }
+
+  async getArtifacts(): Promise<{ artifacts: Artifact[] }> {
+    await this.init();
+    return { artifacts: this.storage.getArtifacts() };
+  }
+
+  async clear(): Promise<{ ok: boolean }> {
+    await this.init();
+    await this.storage.clearAll();
+    if (this.memory) {
+      await this.memory.clearSessionMemory();
+    }
+    return { ok: true };
+  }
+
+  async uploadFile(
+    base64: string,
+    mimeType: string,
+    name: string
+  ): Promise<{ success: boolean; file: FileMetadata }> {
+    await this.init();
+    const metadata = await this.gemini.uploadFile(base64, mimeType, name);
+    return { success: true, file: metadata };
+  }
+
+  async listFiles(): Promise<{ files: FileMetadata[] }> {
+    await this.init();
+    const files = await this.gemini.listFiles();
+    return { files };
+  }
+
+  async deleteFile(fileUri: string): Promise<{ ok: boolean }> {
+    await this.init();
+    await this.gemini.deleteFile(fileUri);
+    return { ok: true };
+  }
+
+  async getStatus(): Promise<StatusResponse> {
+    await this.init();
+    return {
+      sessionId: this.sessionId,
+      messageCount: this.storage.getMessages().length,
+      artifactCount: this.storage.getArtifacts().length,
+      protocol: 'Optimized Gemini 2.5 with System Instructions',
+      promptingStrategy: 'XML-structured with few-shot examples',
+      metrics: this.metrics,
+      nativeTools: {
+        googleSearch: true,
+        googleMaps: true,
+        codeExecution: true,
+        urlContext: true,
+        fileSearch: true,
+        thinking: true,
+      },
+      memory: this.memory ? this.memory.getMetrics() : null,
+    };
+  }
+
+  // ===========================================================================
+  // HTTP Handler (WebSocket Upgrade Only)
+  // ===========================================================================
+
+  async fetch(request: Request): Promise<Response> {
     const upgradeHeader = request.headers.get('Upgrade');
+    
     if (upgradeHeader?.toLowerCase() === 'websocket') {
       return this.handleWebSocketUpgrade(request);
     }
 
-    await this.init();
+    // All other requests should use RPC
+    return new Response('Use RPC methods for API calls', { 
+      status: 400,
+      headers: { 'Content-Type': 'text/plain' }
+    });
+  }
+
+  // ===========================================================================
+  // Hibernatable WebSocket Support
+  // ===========================================================================
+
+  private handleWebSocketUpgrade(request: Request): Response {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    // Use native Durable Object WebSocket support (hibernatable)
+    this.state.acceptWebSocket(server);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+  }
+
+  // WebSocket lifecycle handlers (called automatically by Cloudflare)
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (typeof message !== 'string') return;
 
     try {
-      switch (path) {
-        case '/api/chat':
-          if (request.method === 'POST') {
-            return await this.handleChatRequest(request);
-          }
+      const msg: WSIncomingMessage = JSON.parse(message);
+
+      switch (msg.type) {
+        case 'user_message':
+          await this.handleWebSocketChat(ws, msg.content, msg.images);
           break;
 
-        case '/api/history':
-          if (request.method === 'GET') {
-            return this.jsonResponse({ messages: this.storage.getMessages() });
-          }
+        case 'ping':
+          ws.send(JSON.stringify({ type: 'pong' } as WSOutgoingMessage));
           break;
 
-        case '/api/artifacts':
-          if (request.method === 'GET') {
-            return this.jsonResponse({ artifacts: this.storage.getArtifacts() });
-          }
-          break;
-
-        case '/api/clear':
-          if (request.method === 'POST') {
-            await this.storage.clearAll();
-            if (this.memory) await this.memory.clearSessionMemory();
-            return this.jsonResponse({ ok: true });
-          }
-          break;
-
-        case '/api/status':
-          if (request.method === 'GET') {
-            return this.jsonResponse(await this.getStatus());
-          }
-          break;
-
-        case '/api/upload':
-          if (request.method === 'POST') {
-            return await this.handleFileUpload(request);
-          }
-          break;
-
-        case '/api/files':
-          if (request.method === 'GET') {
-            return await this.handleListFiles();
-          }
+        case 'cancel_task':
+          // TODO: Implement task cancellation
+          ws.send(
+            JSON.stringify({
+              type: 'status',
+              message: 'Task cancellation not yet implemented',
+            } as WSOutgoingMessage)
+          );
           break;
       }
-
-      return new Response('Not Found', { status: 404 });
-    } catch (err: any) {
-      console.error('[OrionAgent] Request error:', err);
-      return this.jsonResponse({ error: err.message }, 500);
+    } catch (e) {
+      console.error(`[Orion:${this.sessionId}] WebSocket error:`, e);
+      ws.send(
+        JSON.stringify({
+          type: 'error',
+          error: e instanceof Error ? e.message : String(e),
+        } as WSOutgoingMessage)
+      );
     }
   }
 
-  // =============================================================
-  // Admin Loop
-  // =============================================================
+  async webSocketClose(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<void> {
+    console.log(
+      `[Orion:${this.sessionId}] WebSocket closed: ${code} - ${reason} (clean: ${wasClean})`
+    );
+  }
 
-  private async handleChatRequest(request: Request): Promise<Response> {
-    const body = await request.json() as { 
-      message: string; 
-      images?: Array<{ data: string; mimeType: string }>;
+  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    console.error(`[Orion:${this.sessionId}] WebSocket error:`, error);
+  }
+
+  // ===========================================================================
+  // WebSocket Chat Handler
+  // ===========================================================================
+
+  private async handleWebSocketChat(
+    ws: WebSocket,
+    message: string,
+    images?: Array<{ data: string; mimeType: string }>
+  ): Promise<void> {
+    await this.init();
+
+    const callbacks = {
+      onStatus: (msg: string) => {
+        ws.send(JSON.stringify({ type: 'status', message: msg } as WSOutgoingMessage));
+      },
+      onThought: (thought: string) => {
+        ws.send(JSON.stringify({ type: 'thought', content: thought } as WSOutgoingMessage));
+      },
+      onChunk: (chunk: string) => {
+        ws.send(JSON.stringify({ type: 'chunk', content: chunk } as WSOutgoingMessage));
+      },
+      onToolUse: (tool: string, params: any) => {
+        ws.send(JSON.stringify({ type: 'tool_use', tool, params } as WSOutgoingMessage));
+      },
+      onArtifact: (artifact: Artifact) => {
+        ws.send(JSON.stringify({ type: 'artifact', artifact } as WSOutgoingMessage));
+      },
+      onWorkerProgress: (event: WSOutgoingMessage) => {
+        ws.send(JSON.stringify(event));
+      },
     };
-    
-    const message = body.message?.trim();
-    if (!message) {
-      return this.jsonResponse({ error: 'Missing message' }, 400);
-    }
 
-    const result = await this.executeAdminLoop(message, body.images);
-    return this.jsonResponse(result);
+    try {
+      const result = await this.executeAdminLoop(message, images, callbacks);
+
+      ws.send(
+        JSON.stringify({
+          type: 'complete',
+          response: result.response,
+          artifacts: result.artifacts,
+          metadata: {
+            turnsUsed: result.turnsUsed,
+            toolsUsed: result.toolsUsed,
+            thinkingTokens: result.thinkingTokens,
+          },
+        } as WSOutgoingMessage)
+      );
+    } catch (error) {
+      ws.send(
+        JSON.stringify({
+          type: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        } as WSOutgoingMessage)
+      );
+    }
   }
+
+  // ===========================================================================
+  // Admin Loop
+  // ===========================================================================
 
   async executeAdminLoop(
     userMessage: string,
@@ -220,8 +420,15 @@ export class OrionAgent extends DurableObject {
       onStatus?: (msg: string) => void;
       onToolUse?: (tool: string, params: any) => void;
       onArtifact?: (artifact: Artifact) => void;
+      onWorkerProgress?: (event: WSOutgoingMessage) => void;
     }
-  ): Promise<{ response: string; artifacts: Artifact[] }> {
+  ): Promise<{
+    response: string;
+    artifacts: Artifact[];
+    turnsUsed?: number;
+    toolsUsed?: string[];
+    thinkingTokens?: number;
+  }> {
     const startTime = Date.now();
     this.metrics.totalRequests++;
 
@@ -232,7 +439,7 @@ export class OrionAgent extends DurableObject {
 
     // Get files info
     const files = await this.gemini.listFiles();
-    
+
     // Build user prompt with context
     const userPrompt = buildAdminUserPrompt(userMessage, {
       hasFiles: files.length > 0,
@@ -243,26 +450,15 @@ export class OrionAgent extends DurableObject {
     });
 
     const artifacts: Artifact[] = [];
+    const toolsUsed = new Set<string>();
     let turn = 0;
     const maxTurns = 10;
+    let totalThinkingTokens = 0;
 
-    // Build conversation history (FIXED: proper format)
-    const conversationHistory: Array<{ role: string; content: string }> = [];
-    
-    // Add system instruction as first message
-    conversationHistory.push({
-      role: 'system',
-      content: this.adminSystemInstruction
-    });
-
-    // Add recent conversation context
-    const recentMessages = this.storage.getMessages().slice(-10);
-    for (const msg of recentMessages) {
-      conversationHistory.push({
-        role: msg.role === 'model' ? 'assistant' : 'user',
-        content: this.extractMessageContent(msg)
-      });
-    }
+    // Conversation history for context
+    const conversationHistory = this.formatContextForGemini(
+      this.storage.getMessages().slice(-10)
+    );
 
     while (turn < maxTurns) {
       turn++;
@@ -270,41 +466,33 @@ export class OrionAgent extends DurableObject {
 
       callbacks?.onStatus?.(`Processing (turn ${turn}/${maxTurns})...`);
 
-      // Add current user message on first turn
-      if (turn === 1) {
-        conversationHistory.push({
-          role: 'user',
-          content: userPrompt
-        });
-      } else {
-        conversationHistory.push({
-          role: 'user',
-          content: 'Continue with your task.'
-        });
-      }
+      // Build messages array
+      const messages = [
+        { role: 'system', content: this.adminSystemInstruction },
+        ...conversationHistory,
+        { role: 'user', content: turn === 1 ? userPrompt : 'Continue with your task.' },
+      ];
 
-      // Call Gemini with native tools
-      const response = await this.gemini.generateWithNativeTools(
-        conversationHistory,
-        {
-          stream: false, // Simplified for debugging
-          temperature: 1.0,
-          thinkingConfig: {
-            thinkingBudget: 8192,
-            enableThinking: true,
-          },
-          useSearch: true,
-          useMaps: true,
-          useCodeExecution: true,
-          useFileSearch: files.length > 0,
-          images: turn === 1 ? images : undefined,
-          files: files.length > 0 ? files : undefined,
-          maxOutputTokens: 8192,
-        }
-      );
+      // Call Gemini with all native tools enabled
+      const response = await this.gemini.generateWithNativeTools(messages, {
+        stream: true,
+        temperature: 1.0,
+        thinkingConfig: {
+          thinkingBudget: 8192,
+          includeThoughts: true,
+        },
+        useSearch: true,
+        useMaps: true,
+        useCodeExecution: true,
+        useFileSearch: files.length > 0,
+        images: turn === 1 ? images : undefined,
+        files: files.length > 0 ? files : undefined,
+        maxOutputTokens: 8192,
+      });
 
       // Track metrics
       if (response.usageMetadata) {
+        totalThinkingTokens += response.usageMetadata.totalTokens;
         this.metrics.thinkingTokensUsed += response.usageMetadata.totalTokens;
       }
 
@@ -316,27 +504,23 @@ export class OrionAgent extends DurableObject {
       // Track native tool usage
       if (response.searchResults) {
         this.metrics.nativeToolCalls++;
-        callbacks?.onToolUse?.('google_search', { 
-          query: 'automatic', 
-          results: response.searchResults.length 
+        toolsUsed.add('google_search');
+        callbacks?.onToolUse?.('google_search', {
+          query: 'automatic',
+          results: response.searchResults.length,
         });
       }
 
       if (response.codeExecutionResults) {
         this.metrics.nativeToolCalls++;
-        callbacks?.onToolUse?.('code_execution', { 
-          executed: response.codeExecutionResults.length 
+        toolsUsed.add('code_execution');
+        callbacks?.onToolUse?.('code_execution', {
+          executed: response.codeExecutionResults.length,
         });
       }
 
       // Parse response
       const parsed = this.parseAdminResponse(response.text, response);
-
-      // Add assistant response to history
-      conversationHistory.push({
-        role: 'assistant',
-        content: response.text
-      });
 
       // Handle actions
       switch (parsed.action) {
@@ -344,22 +528,33 @@ export class OrionAgent extends DurableObject {
           // Direct response - complete
           const fullResponse = parsed.content;
           await this.saveMessage('model', fullResponse);
-          
+
           // Save to memory
           if (this.memory) {
             this.saveToMemory(userMessage, fullResponse).catch(console.warn);
           }
-          
+
           // Background D1 sync
           this.syncToD1().catch(console.warn);
-          
-          console.log(`[OrionAgent] Completed in ${Date.now() - startTime}ms, ${turn} turns`);
-          return { response: fullResponse, artifacts };
+
+          console.log(
+            `[Orion:${this.sessionId}] Completed in ${Date.now() - startTime}ms, ${turn} turns`
+          );
+
+          return {
+            response: fullResponse,
+            artifacts,
+            turnsUsed: turn,
+            toolsUsed: Array.from(toolsUsed),
+            thinkingTokens: totalThinkingTokens,
+          };
 
         case 'memory_search':
           callbacks?.onStatus?.('💾 Searching conversation memory...');
+          toolsUsed.add('memory_search');
+
           const memoryResults = await this.performMemorySearch(parsed.memoryQuery!);
-          
+
           conversationHistory.push({
             role: 'user',
             content: `<memory_results>\n${memoryResults}\n</memory_results>`,
@@ -377,28 +572,30 @@ export class OrionAgent extends DurableObject {
 
           callbacks?.onStatus?.(`👤 Delegating to ${parsed.delegation.workerType}...`);
           this.metrics.delegations++;
-          
-          const workerResult = await this.executeWorkerLoop(
-            parsed.delegation,
-            callbacks
-          );
+          toolsUsed.add(`worker_${parsed.delegation.workerType}`);
+
+          const workerResult = await this.executeWorkerLoop(parsed.delegation, callbacks);
 
           // Handle worker result
           if (workerResult.success && workerResult.artifactId) {
-            const artifact = this.storage.getArtifacts().find(
-              a => a.id === workerResult.artifactId
-            );
+            const artifact = this.storage
+              .getArtifacts()
+              .find((a) => a.id === workerResult.artifactId);
             if (artifact) {
               artifacts.push(artifact);
               callbacks?.onArtifact?.(artifact);
             }
           }
 
+          // Add worker tools to main tools used
+          workerResult.toolsUsed.forEach((tool) => toolsUsed.add(tool));
+
           const workerSummary = workerResult.success
             ? `<worker_result status="success">
 Worker: ${parsed.delegation.workerType}
 Summary: ${workerResult.summary}
 Artifact ID: ${workerResult.artifactId}
+Tools Used: ${workerResult.toolsUsed.join(', ')}
 </worker_result>`
             : `<worker_result status="failed">
 Worker: ${parsed.delegation.workerType}
@@ -411,18 +608,31 @@ Error: ${workerResult.error}
           });
           break;
       }
+
+      // Add assistant's response to history
+      conversationHistory.push({
+        role: 'assistant',
+        content: response.text,
+      });
     }
 
     // Max turns reached
-    const timeoutResponse = 'I reached my processing limit. Let me provide what I have so far.';
+    const timeoutResponse =
+      'I reached my processing limit while working on your request. Let me summarize what I was able to accomplish so far...';
     await this.saveMessage('model', timeoutResponse);
-    
-    return { response: timeoutResponse, artifacts };
+
+    return {
+      response: timeoutResponse,
+      artifacts,
+      turnsUsed: turn,
+      toolsUsed: Array.from(toolsUsed),
+      thinkingTokens: totalThinkingTokens,
+    };
   }
 
-  // =============================================================
+  // ===========================================================================
   // Worker Loop
-  // =============================================================
+  // ===========================================================================
 
   private async executeWorkerLoop(
     envelope: TaskEnvelope,
@@ -450,7 +660,14 @@ Error: ${workerResult.error}
     }
 
     callbacks?.onStatus?.(`Starting ${config.name}...`);
+    callbacks?.onWorkerProgress?.({
+      type: 'worker_started',
+      message: `${config.name} starting task`,
+      worker: envelope.workerType,
+      taskId: envelope.taskId,
+    });
 
+    // Build system instruction for worker
     const systemInstruction = buildWorkerSystemInstruction(envelope.workerType, {
       name: config.name,
       description: config.description,
@@ -458,6 +675,7 @@ Error: ${workerResult.error}
       outputFormat: envelope.expectedOutput.format,
     });
 
+    // Build task prompt
     const taskPrompt = buildWorkerTaskPrompt({
       objective: envelope.objective,
       context: envelope.context,
@@ -471,10 +689,7 @@ Error: ${workerResult.error}
     let turn = 0;
     const maxTurns = config.maxTurns || 8;
 
-    const workerHistory: Array<{ role: string; content: string }> = [
-      { role: 'system', content: systemInstruction },
-      { role: 'user', content: taskPrompt }
-    ];
+    const workerHistory: Array<{ role: string; content: string }> = [];
 
     while (turn < maxTurns) {
       turn++;
@@ -488,37 +703,42 @@ Error: ${workerResult.error}
         progress: Math.round((turn / maxTurns) * 100),
       });
 
-      const response = await this.gemini.generateWithNativeTools(
-        workerHistory,
+      // Build messages
+      const messages = [
+        { role: 'system', content: systemInstruction },
         {
-          stream: false,
-          temperature: config.temperature || 0.7,
-          useSearch: config.tools.some(t => t.name === 'web_search' && t.enabled),
-          useCodeExecution: config.tools.some(t => t.name === 'code_execution' && t.enabled),
-          thinkingConfig: {
-            thinkingBudget: 4096,
-            enableThinking: true,
-          },
-          maxOutputTokens: 8192,
-        }
-      );
+          role: 'user',
+          content:
+            turn === 1
+              ? taskPrompt
+              : 'Continue with your task. Remember to output in the specified format when complete.',
+        },
+        ...workerHistory,
+      ];
 
+      // Call Gemini
+      const response = await this.gemini.generateWithNativeTools(messages, {
+        stream: false,
+        temperature: config.temperature || 0.7,
+        useSearch: config.tools.some((t) => t.name === 'web_search' && t.enabled),
+        useCodeExecution: config.tools.some((t) => t.name === 'code_execution' && t.enabled),
+        thinkingConfig: {
+          thinkingBudget: 4096,
+          includeThoughts: true,
+        },
+        maxOutputTokens: 8192,
+      });
+
+      // Track tools used
       if (response.searchResults) toolsUsed.push('web_search');
       if (response.codeExecutionResults) toolsUsed.push('code_execution');
 
+      // Parse worker response
       const parsed = this.parseWorkerResponse(response.text);
 
-      workerHistory.push({
-        role: 'assistant',
-        content: response.text
-      });
-
       if (parsed.complete && parsed.output) {
-        const artifact = await this.createArtifact(
-          envelope,
-          parsed.output,
-          envelope.workerType
-        );
+        // Worker is done!
+        const artifact = await this.createArtifact(envelope, parsed.output, envelope.workerType);
 
         await this.storage.saveArtifact(artifact);
 
@@ -538,29 +758,35 @@ Error: ${workerResult.error}
         };
       }
 
-      workerHistory.push({
-        role: 'user',
-        content: '<instruction>Continue working on the task. Output your final deliverable when ready.</instruction>'
-      });
+      // Not done yet - continue
+      workerHistory.push(
+        { role: 'assistant', content: response.text },
+        {
+          role: 'user',
+          content:
+            '<instruction>Continue working on the task. Output your final deliverable when ready.</instruction>',
+        }
+      );
     }
+
+    // Max turns reached
+    console.warn(`[Worker:${config.type}] Max turns reached without completion`);
 
     return {
       success: false,
       summary: 'Task incomplete',
-      error: 'Worker exceeded maximum turns',
+      error: 'Worker exceeded maximum turns without completing task',
       toolsUsed: [...new Set(toolsUsed)],
       turnsUsed: turn,
     };
   }
 
-  // =============================================================
+  // ===========================================================================
   // Response Parsing
-  // =============================================================
+  // ===========================================================================
 
-  private parseAdminResponse(
-    text: string,
-    geminiResponse: any
-  ): ParsedAdminResponse {
+  private parseAdminResponse(text: string, geminiResponse: any): ParsedAdminResponse {
+    // Check for memory search (explicit)
     const memoryMatch = text.match(/\[MEMORY_SEARCH:\s*([^\]]+)\]/i);
     if (memoryMatch) {
       return {
@@ -570,6 +796,7 @@ Error: ${workerResult.error}
       };
     }
 
+    // Check for delegation (explicit)
     const delegateMatch = text.match(/<delegate>([\s\S]*?)<\/delegate>/);
     if (delegateMatch) {
       const delegation = this.parseDelegationXML(delegateMatch[1]);
@@ -578,13 +805,22 @@ Error: ${workerResult.error}
           action: 'delegate',
           content: text.replace(/<delegate>[\s\S]*?<\/delegate>/, '').trim(),
           delegation,
+          metadata: {
+            searchResults: geminiResponse.searchResults,
+            codeExecutionResults: geminiResponse.codeExecutionResults,
+          },
         };
       }
     }
 
+    // Default: direct response
     return {
       action: 'respond',
       content: text.trim(),
+      metadata: {
+        searchResults: geminiResponse.searchResults,
+        codeExecutionResults: geminiResponse.codeExecutionResults,
+      },
     };
   }
 
@@ -595,10 +831,11 @@ Error: ${workerResult.error}
         return match ? match[1].trim() : '';
       };
 
-      const workerType = extract('worker') as any;
+      const workerType = extract('worker') as WorkerType;
       const objective = extract('objective');
 
       if (!workerType || !objective) {
+        console.warn('[Orion] Invalid delegation - missing worker or objective');
         return null;
       }
 
@@ -609,40 +846,63 @@ Error: ${workerResult.error}
         context: extract('context'),
         instructions: extract('instructions'),
         constraints: extract('constraints').split('\n').filter(Boolean),
-        expectedOutput: { format: (extract('format') as any) || 'markdown' },
+        expectedOutput: {
+          format: (extract('format') as any) || 'markdown',
+        },
         qualityCriteria: extract('quality').split('\n').filter(Boolean),
       };
     } catch (e) {
-      console.error('[OrionAgent] Delegation parsing error:', e);
+      console.error('[Orion] Delegation XML parsing error:', e);
       return null;
     }
   }
 
   private parseWorkerResponse(text: string): ParsedWorkerResponse {
+    // Look for OUTPUT section
     const outputMatch = text.match(/OUTPUT:\s*\n([\s\S]*?)(?:\n\nSUMMARY:|$)/i);
     if (outputMatch) {
       const output = outputMatch[1].trim();
+
+      // Extract SUMMARY
       const summaryMatch = text.match(/SUMMARY:\s*([^\n]+)/i);
       const summary = summaryMatch ? summaryMatch[1].trim() : undefined;
-      
+
+      // Extract CONFIDENCE
+      const confMatch = text.match(/CONFIDENCE:\s*(high|medium|low)/i);
+      const confidence = confMatch ? (confMatch[1].toLowerCase() as any) : undefined;
+
       return {
         output,
         summary,
+        confidence,
         complete: true,
       };
     }
 
+    // Not complete yet
     return { complete: false };
   }
 
-  // =============================================================
+  // ===========================================================================
   // Helper Methods
-  // =============================================================
+  // ===========================================================================
+
+  private formatContextForGemini(
+    messages: Message[]
+  ): Array<{ role: string; content: string }> {
+    return messages.map((msg) => ({
+      role: msg.role === 'model' ? 'assistant' : 'user',
+      content: this.extractMessageContent(msg),
+    }));
+  }
 
   private extractMessageContent(msg: Message): string {
     if (msg.content) return msg.content;
     if (msg.parts) {
-      return msg.parts.map(p => p.text || '').filter(Boolean).join('\n');
+      return msg.parts
+        .map((p) => p.text || '')
+        .filter(Boolean)
+        .join('\n');
     }
     return '';
   }
@@ -653,26 +913,33 @@ Error: ${workerResult.error}
 
   private async performMemorySearch(query: string): Promise<string> {
     if (!this.memory) {
-      return '<memory_error>Memory search not available</memory_error>';
+      return '<memory_error>Memory search not available - Vectorize not configured</memory_error>';
     }
-    
+
     try {
       const results = await this.memory.searchMemory(query, { topK: 5 });
       if (results.length === 0) {
         return '<memory_result>No relevant past conversations found</memory_result>';
       }
-      
+
       return results
-        .map((r, i) => `<memory_item index="${i + 1}" relevance="${Math.round(r.score * 100)}%">\n${r.content}\n</memory_item>`)
+        .map(
+          (r, i) =>
+            `<memory_item index="${i + 1}" relevance="${Math.round(r.score * 100)}%">\n${
+              r.content
+            }\n</memory_item>`
+        )
         .join('\n\n');
     } catch (e) {
-      return `<memory_error>${e instanceof Error ? e.message : 'Memory search failed'}</memory_error>`;
+      return `<memory_error>${
+        e instanceof Error ? e.message : 'Memory search failed'
+      }</memory_error>`;
     }
   }
 
   private async saveToMemory(userMsg: string, assistantMsg: string): Promise<void> {
     if (!this.memory) return;
-    
+
     await this.memory.saveMemoryBatch([
       {
         content: `User: ${userMsg}`,
@@ -692,14 +959,17 @@ Error: ${workerResult.error}
   private async createArtifact(
     envelope: TaskEnvelope,
     content: string,
-    workerType: string
+    workerType: WorkerType
   ): Promise<Artifact> {
-    const typeMap: Record<string, Artifact['type']> = {
+    const typeMap: Record<WorkerType, Artifact['type']> = {
       deep_search: 'research',
       data_analyst: 'analysis',
       content_writer: 'content',
       code_developer: 'code',
       report_generator: 'report',
+      seo_specialist: 'analysis',
+      editor: 'content',
+      synthesizer: 'content',
     };
 
     return {
@@ -724,7 +994,7 @@ Error: ${workerResult.error}
       if (messages.length === 0) return;
 
       const latestInD1 = await this.d1.getLatestMessageTimestamp(this.sessionId);
-      const newMessages = messages.filter(m => (m.timestamp || 0) > latestInD1);
+      const newMessages = messages.filter((m) => (m.timestamp || 0) > latestInD1);
 
       if (newMessages.length > 0) {
         await this.d1.saveMessages(this.sessionId, newMessages);
@@ -735,179 +1005,8 @@ Error: ${workerResult.error}
         await this.d1.saveArtifact(this.sessionId, artifact);
       }
     } catch (err) {
-      console.error('[OrionAgent] D1 sync failed:', err);
+      console.error(`[Orion:${this.sessionId}] D1 sync failed:`, err);
     }
-  }
-
-  // =============================================================
-  // File Management
-  // =============================================================
-
-  private async handleFileUpload(request: Request): Promise<Response> {
-    try {
-      const formData = await request.formData();
-      const file = formData.get('file') as File;
-      
-      if (!file) {
-        return this.jsonResponse({ error: 'No file provided' }, 400);
-      }
-
-      const buffer = await file.arrayBuffer();
-      const uint8Array = new Uint8Array(buffer);
-      const base64 = this.arrayBufferToBase64(uint8Array);
-
-      const metadata = await this.gemini.uploadFile(
-        base64,
-        file.type,
-        file.name
-      );
-
-      return this.jsonResponse({ success: true, file: metadata });
-    } catch (err: any) {
-      return this.jsonResponse({ error: err.message }, 500);
-    }
-  }
-
-  private async handleListFiles(): Promise<Response> {
-    const files = await this.gemini.listFiles();
-    return this.jsonResponse({ files });
-  }
-
-  // Helper to convert ArrayBuffer to base64 (Cloudflare Workers compatible)
-  private arrayBufferToBase64(buffer: Uint8Array): string {
-    let binary = '';
-    const len = buffer.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(buffer[i]);
-    }
-    return btoa(binary);
-  }
-
-  // =============================================================
-  // WebSocket (FIXED)
-  // =============================================================
-
-  private handleWebSocketUpgrade(request: Request): Response {
-    // Create WebSocket pair
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-
-    // Accept the WebSocket connection
-    this.state.acceptWebSocket(server);
-    this.activeSockets.add(server);
-
-    // Set up event handlers
-    server.addEventListener('message', async (event: MessageEvent) => {
-      await this.handleWebSocketMessage(server, event.data);
-    });
-
-    server.addEventListener('close', () => {
-      this.activeSockets.delete(server);
-    });
-
-    server.addEventListener('error', () => {
-      this.activeSockets.delete(server);
-    });
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    });
-  }
-
-  private async handleWebSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
-    if (typeof data !== 'string') return;
-
-    try {
-      const msg = JSON.parse(data);
-      
-      if (msg.type === 'user_message' && msg.content) {
-        // Execute admin loop with callbacks
-        const result = await this.executeAdminLoop(
-          msg.content,
-          msg.images,
-          {
-            onThought: (thought) => {
-              this.sendWebSocketMessage(ws, {
-                type: 'thinking',
-                message: thought
-              });
-            },
-            onStatus: (status) => {
-              this.sendWebSocketMessage(ws, {
-                type: 'status',
-                message: status
-              });
-            },
-            onChunk: (chunk) => {
-              this.sendWebSocketMessage(ws, {
-                type: 'chunk',
-                content: chunk
-              });
-            },
-            onArtifact: (artifact) => {
-              this.sendWebSocketMessage(ws, {
-                type: 'artifact',
-                artifact
-              });
-            },
-            onWorkerProgress: (event) => {
-              this.sendWebSocketMessage(ws, event);
-            }
-          }
-        );
-
-        // Send complete response
-        this.sendWebSocketMessage(ws, {
-          type: 'complete',
-          content: result.response,
-          artifacts: result.artifacts
-        });
-      }
-    } catch (e) {
-      console.error('[OrionAgent] WS error:', e);
-      this.sendWebSocketMessage(ws, {
-        type: 'error',
-        message: e instanceof Error ? e.message : 'Unknown error'
-      });
-    }
-  }
-
-  private sendWebSocketMessage(ws: WebSocket, message: any): void {
-    try {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(message));
-      }
-    } catch (e) {
-      console.error('[OrionAgent] Failed to send WS message:', e);
-    }
-  }
-
-  // =============================================================
-  // Status
-  // =============================================================
-
-  private async getStatus(): Promise<object> {
-    return {
-      sessionId: this.sessionId,
-      ...this.storage.getStatus(),
-      protocol: 'Optimized Gemini 2.5',
-      metrics: this.metrics,
-      nativeTools: {
-        googleSearch: true,
-        googleMaps: true,
-        codeExecution: true,
-        thinking: true,
-      },
-      memory: this.memory ? this.memory.getMetrics() : null,
-    };
-  }
-
-  private jsonResponse(data: any, status = 200): Response {
-    return new Response(JSON.stringify(data), {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    });
   }
 }
 
