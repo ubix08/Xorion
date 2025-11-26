@@ -1046,4 +1046,801 @@
                         ></textarea>
                         
                         <div class="input-actions">
-                            <button class="btn-attach" id="attachBtn" title="
+                            <button class="btn-attach" id="attachBtn" title="Attach file">
+                                <span>📎</span>
+                            </button>
+                            <input type="file" id="fileInput" accept="image/*,.pdf,.txt,.doc,.docx" multiple>
+                            <button class="btn-send" id="sendBtn" title="Send message">
+                                <span>↑</span>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="input-hint">
+                        Press Enter to send, Shift + Enter for new line
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">Settings</h2>
+                <button class="btn-icon" id="closeSettings">
+                    <span>✕</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Worker URL</label>
+                    <input type="text" class="form-input" id="workerUrl" value="https://xorion.ubixsnow08.workers.dev">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Session ID</label>
+                    <input type="text" class="form-input" id="sessionId" readonly>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Theme</label>
+                    <select class="form-input" id="themeSelect">
+                        <option value="dark">Dark</option>
+                        <option value="light">Light</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="clearSession">Clear session</button>
+                <button class="btn btn-primary" id="saveSettings">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        // =====================================================
+        // Configuration & State
+        // =====================================================
+        const state = {
+            ws: null,
+            sessionId: null,
+            workerUrl: 'https://xorion.ubixsnow08.workers.dev',
+            theme: 'dark',
+            isProcessing: false,
+            reconnectAttempts: 0,
+            maxReconnectAttempts: 5,
+            currentStreamingMessage: null,
+            uploadedFiles: [],
+            sessions: []
+        };
+
+        const elements = {
+            sidebar: document.getElementById('sidebar'),
+            toggleSidebar: document.getElementById('toggleSidebar'),
+            newChatBtn: document.getElementById('newChatBtn'),
+            sessionsList: document.getElementById('sessionsList'),
+            messagesContainer: document.getElementById('messagesContainer'),
+            messagesWrapper: document.getElementById('messagesWrapper'),
+            emptyState: document.getElementById('emptyState'),
+            messageInput: document.getElementById('messageInput'),
+            sendBtn: document.getElementById('sendBtn'),
+            attachBtn: document.getElementById('attachBtn'),
+            fileInput: document.getElementById('fileInput'),
+            uploadedFiles: document.getElementById('uploadedFiles'),
+            settingsModal: document.getElementById('settingsModal'),
+            settingsBtn: document.getElementById('settingsBtn'),
+            closeSettings: document.getElementById('closeSettings'),
+            saveSettings: document.getElementById('saveSettings'),
+            clearSession: document.getElementById('clearSession'),
+            workerUrl: document.getElementById('workerUrl'),
+            sessionId: document.getElementById('sessionId'),
+            themeToggle: document.getElementById('themeToggle'),
+            themeSelect: document.getElementById('themeSelect'),
+            userProfile: document.getElementById('userProfile'),
+            toastContainer: document.getElementById('toastContainer')
+        };
+
+        // =====================================================
+        // Markdown Configuration
+        // =====================================================
+        marked.setOptions({
+            highlight: function(code, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    return hljs.highlight(code, { language: lang }).value;
+                }
+                return hljs.highlightAuto(code).value;
+            },
+            breaks: true,
+            gfm: true
+        });
+
+        // =====================================================
+        // Utility Functions
+        // =====================================================
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = Math.random() * 16 | 0;
+                return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatMarkdown(text) {
+            // Pre-process code blocks to add language detection
+            text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
+                const language = lang || 'plaintext';
+                return `<div class="code-block">
+                    <div class="code-header">
+                        <span class="code-language">${language}</span>
+                        <button class="btn-copy-code" onclick="copyCode(this)">Copy</button>
+                    </div>
+                    <div class="code-content">
+                        <pre><code class="language-${language}">${escapeHtml(code.trim())}</code></pre>
+                    </div>
+                </div>`;
+            });
+
+            return marked.parse(text);
+        }
+
+        function copyCode(button) {
+            const codeBlock = button.closest('.code-block');
+            const code = codeBlock.querySelector('code').textContent;
+            
+            navigator.clipboard.writeText(code).then(() => {
+                button.textContent = 'Copied!';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = 'Copy';
+                    button.classList.remove('copied');
+                }, 2000);
+            });
+        }
+
+        function showToast(title, message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `
+                <div class="toast-icon">${type === 'success' ? '✓' : '✕'}</div>
+                <div class="toast-content">
+                    <div class="toast-title">${escapeHtml(title)}</div>
+                    <div class="toast-message">${escapeHtml(message)}</div>
+                </div>
+            `;
+            elements.toastContainer.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(100%)';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        function scrollToBottom() {
+            elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+        }
+
+        // =====================================================
+        // Theme Management
+        // =====================================================
+        function setTheme(theme) {
+            state.theme = theme;
+            document.body.setAttribute('data-theme', theme);
+            elements.themeSelect.value = theme;
+            
+            const icon = elements.themeToggle.querySelector('.theme-icon');
+            icon.textContent = theme === 'dark' ? '☀️' : '🌙';
+            
+            localStorage.setItem('orion_theme', theme);
+        }
+
+        elements.themeToggle.addEventListener('click', () => {
+            setTheme(state.theme === 'dark' ? 'light' : 'dark');
+        });
+
+        elements.themeSelect.addEventListener('change', (e) => {
+            setTheme(e.target.value);
+        });
+
+        // =====================================================
+        // Session Management
+        // =====================================================
+        function loadSessions() {
+            const sessions = JSON.parse(localStorage.getItem('orion_sessions') || '[]');
+            state.sessions = sessions;
+            renderSessions();
+        }
+
+        function renderSessions() {
+            elements.sessionsList.innerHTML = state.sessions.map(session => `
+                <div class="session-item ${session.id === state.sessionId ? 'active' : ''}" 
+                     data-session-id="${session.id}">
+                    <span>💬</span>
+                    <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                        ${escapeHtml(session.title || 'New conversation')}
+                    </span>
+                </div>
+            `).join('');
+
+            // Add click handlers
+            document.querySelectorAll('.session-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const sessionId = item.dataset.sessionId;
+                    if (sessionId !== state.sessionId) {
+                        switchSession(sessionId);
+                    }
+                });
+            });
+        }
+
+        function saveSession() {
+            const existingIndex = state.sessions.findIndex(s => s.id === state.sessionId);
+            const session = {
+                id: state.sessionId,
+                title: getSessionTitle(),
+                timestamp: Date.now()
+            };
+
+            if (existingIndex >= 0) {
+                state.sessions[existingIndex] = session;
+            } else {
+                state.sessions.unshift(session);
+            }
+
+            // Keep only last 20 sessions
+            state.sessions = state.sessions.slice(0, 20);
+            localStorage.setItem('orion_sessions', JSON.stringify(state.sessions));
+            renderSessions();
+        }
+
+        function getSessionTitle() {
+            const messages = elements.messagesWrapper.querySelectorAll('.message.user');
+            if (messages.length > 0) {
+                const firstMsg = messages[0].querySelector('.message-text').textContent;
+                return firstMsg.substring(0, 50) + (firstMsg.length > 50 ? '...' : '');
+            }
+            return 'New conversation';
+        }
+
+        function switchSession(sessionId) {
+            if (state.ws) {
+                state.ws.close();
+            }
+            
+            state.sessionId = sessionId;
+            localStorage.setItem('orion_session_id', sessionId);
+            elements.sessionId.value = sessionId;
+            
+            // Clear current messages
+            const messages = elements.messagesWrapper.querySelectorAll('.message, .thinking-container');
+            messages.forEach(msg => msg.remove());
+            elements.emptyState.style.display = 'flex';
+            
+            connectWebSocket();
+            renderSessions();
+            
+            // Close sidebar on mobile
+            if (window.innerWidth <= 768) {
+                elements.sidebar.classList.add('collapsed');
+            }
+        }
+
+        // =====================================================
+        // Message UI Functions
+        // =====================================================
+        function hideEmptyState() {
+            if (elements.emptyState) {
+                elements.emptyState.style.display = 'none';
+            }
+        }
+
+        function addMessage(role, content, isStreaming = false) {
+            hideEmptyState();
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+            
+            const avatar = document.createElement('div');
+            avatar.className = 'message-avatar';
+            avatar.textContent = role === 'user' ? 'R' : '🤖';
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            const textDiv = document.createElement('div');
+            textDiv.className = 'message-text';
+            
+            if (role === 'assistant' && !isStreaming) {
+                textDiv.innerHTML = formatMarkdown(content);
+                // Re-highlight code blocks
+                textDiv.querySelectorAll('pre code').forEach(block => {
+                    hljs.highlightElement(block);
+                });
+            } else {
+                textDiv.textContent = content;
+                if (isStreaming) {
+                    const cursor = document.createElement('span');
+                    cursor.className = 'streaming-cursor';
+                    textDiv.appendChild(cursor);
+                }
+            }
+            
+            contentDiv.appendChild(textDiv);
+            messageDiv.appendChild(avatar);
+            messageDiv.appendChild(contentDiv);
+            
+            elements.messagesWrapper.appendChild(messageDiv);
+            scrollToBottom();
+            
+            return messageDiv;
+        }
+
+        function updateStreamingMessage(messageElement, additionalContent) {
+            const textDiv = messageElement.querySelector('.message-text');
+            const cursor = textDiv.querySelector('.streaming-cursor');
+            
+            // Update text content
+            const currentText = textDiv.textContent.replace('|', '');
+            textDiv.textContent = currentText + additionalContent;
+            
+            // Re-add cursor
+            if (cursor) {
+                textDiv.appendChild(cursor);
+            }
+            
+            scrollToBottom();
+        }
+
+        function finalizeStreamingMessage(messageElement) {
+            const textDiv = messageElement.querySelector('.message-text');
+            const cursor = textDiv.querySelector('.streaming-cursor');
+            if (cursor) cursor.remove();
+            
+            // Format as markdown
+            const content = textDiv.textContent;
+            textDiv.innerHTML = formatMarkdown(content);
+            
+            // Re-highlight code blocks
+            textDiv.querySelectorAll('pre code').forEach(block => {
+                hljs.highlightElement(block);
+            });
+            
+            scrollToBottom();
+        }
+
+        function showThinking(text, icon = '🧠') {
+            removeThinking();
+            
+            const thinkingDiv = document.createElement('div');
+            thinkingDiv.className = 'thinking-container';
+            thinkingDiv.id = 'thinkingIndicator';
+            thinkingDiv.innerHTML = `
+                <div class="thinking-card">
+                    <div class="thinking-icon">${icon}</div>
+                    <div class="thinking-text">${escapeHtml(text)}</div>
+                    <div class="thinking-dots">
+                        <div class="thinking-dot"></div>
+                        <div class="thinking-dot"></div>
+                        <div class="thinking-dot"></div>
+                    </div>
+                </div>
+            `;
+            
+            elements.messagesWrapper.appendChild(thinkingDiv);
+            scrollToBottom();
+        }
+
+        function removeThinking() {
+            const thinking = document.getElementById('thinkingIndicator');
+            if (thinking) thinking.remove();
+        }
+
+        function showToolBadge(tool, params) {
+            const badges = {
+                google_search: { icon: '🔍', label: 'Searching web' },
+                code_execution: { icon: '⚡', label: 'Running code' },
+                web_fetch: { icon: '🌐', label: 'Fetching page' },
+                worker_deep_search: { icon: '🔬', label: 'Deep research' },
+                worker_data_analyst: { icon: '📊', label: 'Analyzing data' },
+                worker_code_developer: { icon: '💻', label: 'Writing code' }
+            };
+
+            const badge = badges[tool] || { icon: '🔧', label: tool };
+            showThinking(badge.label, badge.icon);
+        }
+
+        // =====================================================
+        // WebSocket Connection
+        // =====================================================
+        function connectWebSocket() {
+            if (state.ws && (state.ws.readyState === WebSocket.CONNECTING || state.ws.readyState === WebSocket.OPEN)) {
+                console.log('WebSocket already connected');
+                return;
+            }
+
+            const wsUrl = state.workerUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+            const fullUrl = `${wsUrl}/api/ws?session_id=${state.sessionId}`;
+            
+            console.log('🔌 Connecting WebSocket:', fullUrl);
+            
+            try {
+                state.ws = new WebSocket(fullUrl);
+                
+                state.ws.onopen = () => {
+                    console.log('✅ WebSocket connected');
+                    state.reconnectAttempts = 0;
+                    
+                    // Heartbeat
+                    setInterval(() => {
+                        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                            state.ws.send(JSON.stringify({ type: 'ping' }));
+                        }
+                    }, 30000);
+                };
+                
+                state.ws.onmessage = (event) => {
+                    try {
+                        const message = JSON.parse(event.data);
+                        handleWebSocketMessage(message);
+                    } catch (e) {
+                        console.error('Failed to parse message:', e);
+                    }
+                };
+                
+                state.ws.onerror = (error) => {
+                    console.error('❌ WebSocket error:', error);
+                };
+                
+                state.ws.onclose = (event) => {
+                    console.log('🔌 WebSocket closed:', event.code);
+                    state.ws = null;
+                    
+                    // Reconnect
+                    if (state.reconnectAttempts < state.maxReconnectAttempts) {
+                        state.reconnectAttempts++;
+                        const delay = Math.min(1000 * Math.pow(2, state.reconnectAttempts), 30000);
+                        console.log(`Reconnecting in ${delay}ms...`);
+                        setTimeout(connectWebSocket, delay);
+                    } else {
+                        showToast('Connection Lost', 'Please refresh the page', 'error');
+                    }
+                };
+                
+            } catch (e) {
+                console.error('Failed to create WebSocket:', e);
+            }
+        }
+
+        // =====================================================
+        // WebSocket Message Handler
+        // =====================================================
+        function handleWebSocketMessage(message) {
+            console.log('📨 Message:', message.type);
+            
+            switch (message.type) {
+                case 'status':
+                    showThinking(message.message);
+                    break;
+                    
+                case 'thought':
+                    console.log('💭 Thinking:', message.content);
+                    break;
+                    
+                case 'chunk':
+                    removeThinking();
+                    if (!state.currentStreamingMessage) {
+                        state.currentStreamingMessage = addMessage('assistant', '', true);
+                    }
+                    updateStreamingMessage(state.currentStreamingMessage, message.content);
+                    break;
+                    
+                case 'tool_use':
+                    showToolBadge(message.tool, message.params);
+                    break;
+                    
+                case 'artifact':
+                    showToast('Artifact Created', message.artifact.title, 'success');
+                    break;
+                    
+                case 'worker_started':
+                case 'worker_progress':
+                    showThinking(message.message, '⚙️');
+                    break;
+                    
+                case 'worker_completed':
+                    removeThinking();
+                    break;
+                    
+                case 'complete':
+                    removeThinking();
+                    
+                    if (state.currentStreamingMessage) {
+                        finalizeStreamingMessage(state.currentStreamingMessage);
+                        state.currentStreamingMessage = null;
+                    } else if (message.response) {
+                        addMessage('assistant', message.response);
+                    }
+                    
+                    state.isProcessing = false;
+                    elements.sendBtn.disabled = false;
+                    elements.messageInput.disabled = false;
+                    
+                    // Save session
+                    saveSession();
+                    
+                    console.log('✅ Complete');
+                    break;
+                    
+                case 'error':
+                    removeThinking();
+                    
+                    if (state.currentStreamingMessage) {
+                        state.currentStreamingMessage.remove();
+                        state.currentStreamingMessage = null;
+                    }
+                    
+                    addMessage('assistant', `❌ Error: ${message.error}`);
+                    showToast('Error', message.error, 'error');
+                    
+                    state.isProcessing = false;
+                    elements.sendBtn.disabled = false;
+                    elements.messageInput.disabled = false;
+                    break;
+                    
+                case 'pong':
+                    break;
+                    
+                default:
+                    console.warn('Unknown message type:', message.type);
+            }
+        }
+
+        // =====================================================
+        // Send Message
+        // =====================================================
+        function sendMessage(content) {
+            if (!content.trim() || state.isProcessing) return;
+            
+            if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+                showToast('Connection Error', 'Reconnecting...', 'error');
+                connectWebSocket();
+                return;
+            }
+            
+            console.log('📤 Sending:', content);
+            
+            state.isProcessing = true;
+            elements.sendBtn.disabled = true;
+            elements.messageInput.disabled = true;
+            
+            // Add user message
+            addMessage('user', content);
+            
+            // Clear input
+            elements.messageInput.value = '';
+            elements.messageInput.style.height = 'auto';
+            
+            // Reset state
+            state.currentStreamingMessage = null;
+            
+            // Send via WebSocket
+            try {
+                state.ws.send(JSON.stringify({
+                    type: 'user_message',
+                    content: content,
+                    images: state.uploadedFiles.filter(f => f.type.startsWith('image/')).map(f => ({
+                        data: f.data,
+                        mimeType: f.type
+                    }))
+                }));
+                
+                // Clear uploaded files
+                state.uploadedFiles = [];
+                elements.uploadedFiles.style.display = 'none';
+                elements.uploadedFiles.innerHTML = '';
+            } catch (e) {
+                console.error('Failed to send:', e);
+                showToast('Error', 'Failed to send message', 'error');
+                state.isProcessing = false;
+                elements.sendBtn.disabled = false;
+                elements.messageInput.disabled = false;
+            }
+        }
+
+        // =====================================================
+        // File Upload
+        // =====================================================
+        elements.attachBtn.addEventListener('click', () => {
+            elements.fileInput.click();
+        });
+
+        elements.fileInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            
+            for (const file of files) {
+                if (file.size > 10 * 1024 * 1024) {
+                    showToast('File Too Large', `${file.name} exceeds 10MB`, 'error');
+                    continue;
+                }
+                
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const base64 = event.target.result.split(',')[1];
+                    state.uploadedFiles.push({
+                        name: file.name,
+                        type: file.type,
+                        data: base64
+                    });
+                    renderUploadedFiles();
+                };
+                reader.readAsDataURL(file);
+            }
+            
+            e.target.value = '';
+        });
+
+        function renderUploadedFiles() {
+            if (state.uploadedFiles.length === 0) {
+                elements.uploadedFiles.style.display = 'none';
+                return;
+            }
+            
+            elements.uploadedFiles.style.display = 'flex';
+            elements.uploadedFiles.innerHTML = state.uploadedFiles.map((file, index) => `
+                <div class="uploaded-file">
+                    <span>📎 ${escapeHtml(file.name)}</span>
+                    <button class="btn-remove-file" onclick="removeFile(${index})">✕</button>
+                </div>
+            `).join('');
+        }
+
+        function removeFile(index) {
+            state.uploadedFiles.splice(index, 1);
+            renderUploadedFiles();
+        }
+
+        // =====================================================
+        // Event Listeners
+        // =====================================================
+        elements.toggleSidebar.addEventListener('click', () => {
+            elements.sidebar.classList.toggle('collapsed');
+        });
+
+        elements.newChatBtn.addEventListener('click', () => {
+            const newSessionId = generateUUID();
+            switchSession(newSessionId);
+            showToast('New Chat', 'Started a new conversation', 'success');
+        });
+
+        elements.messageInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+        });
+
+        elements.messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage(elements.messageInput.value);
+            }
+        });
+
+        elements.sendBtn.addEventListener('click', () => {
+            sendMessage(elements.messageInput.value);
+        });
+
+        // Suggestion cards
+        document.querySelectorAll('.suggestion-card').forEach(card => {
+            card.addEventListener('click', () => {
+                const prompt = card.dataset.prompt;
+                elements.messageInput.value = prompt;
+                sendMessage(prompt);
+            });
+        });
+
+        // Settings
+        elements.settingsBtn.addEventListener('click', () => {
+            elements.settingsModal.classList.add('active');
+        });
+
+        elements.userProfile.addEventListener('click', () => {
+            elements.settingsModal.classList.add('active');
+        });
+
+        elements.closeSettings.addEventListener('click', () => {
+            elements.settingsModal.classList.remove('active');
+        });
+
+        elements.saveSettings.addEventListener('click', () => {
+            const oldUrl = state.workerUrl;
+            state.workerUrl = elements.workerUrl.value;
+            localStorage.setItem('orion_worker_url', state.workerUrl);
+            
+            if (oldUrl !== state.workerUrl && state.ws) {
+                state.ws.close();
+                connectWebSocket();
+            }
+            
+            elements.settingsModal.classList.remove('active');
+            showToast('Settings Saved', 'Configuration updated', 'success');
+        });
+
+        elements.clearSession.addEventListener('click', async () => {
+            if (!confirm('Clear all session data?')) return;
+            
+            try {
+                await fetch(`${state.workerUrl}/api/clear?session_id=${state.sessionId}`, {
+                    method: 'POST'
+                });
+                
+                showToast('Session Cleared', 'All data has been cleared', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } catch (e) {
+                showToast('Error', 'Failed to clear session', 'error');
+            }
+        });
+
+        elements.settingsModal.addEventListener('click', (e) => {
+            if (e.target === elements.settingsModal) {
+                elements.settingsModal.classList.remove('active');
+            }
+        });
+
+        // Mobile: close sidebar when clicking outside
+        elements.messagesContainer.addEventListener('click', () => {
+            if (window.innerWidth <= 768 && !elements.sidebar.classList.contains('collapsed')) {
+                elements.sidebar.classList.add('collapsed');
+            }
+        });
+
+        // =====================================================
+        // Initialization
+        // =====================================================
+        function init() {
+            console.log('🚀 Initializing Orion AI Professional UI...');
+
+            // Load settings
+            const savedUrl = localStorage.getItem('orion_worker_url');
+            if (savedUrl) {
+                state.workerUrl = savedUrl;
+                elements.workerUrl.value = savedUrl;
+            }
+
+            const savedTheme = localStorage.getItem('orion_theme') || 'dark';
+            setTheme(savedTheme);
+
+            // Session
+            state.sessionId = localStorage.getItem('orion_session_id') || generateUUID();
+            localStorage.setItem('orion_session_id', state.sessionId);
+            elements.sessionId.value = state.sessionId;
+
+            // Load sessions
+            loadSessions();
+
+            // Mobile: start with collapsed sidebar
+            if (window.innerWidth <= 768) {
+                elements.sidebar.classList.add('collapsed');
+            }
+
+            // Connect WebSocket
+            connectWebSocket();
+
+            console.log('✅ Initialized');
+        }
+
+        // Start
+        init();
+
+        // Make functions global for inline handlers
+        window.copyCode = copyCode;
+        window.removeFile = removeFile;
+    </script>
+</body>
+</html>
