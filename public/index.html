@@ -33,7 +33,6 @@
             --radius-lg: 16px;
             --radius-full: 9999px;
             --header-height: 64px;
-            --input-height: 80px;
         }
 
         html, body {
@@ -49,7 +48,6 @@
             -moz-osx-font-smoothing: grayscale;
         }
 
-        /* FIXED: Header */
         .header {
             position: fixed;
             top: 0;
@@ -85,26 +83,15 @@
             font-size: 20px;
         }
 
-        .header-title {
-            display: flex;
-            flex-direction: column;
-        }
-
         .header-title h1 {
             font-size: 18px;
             font-weight: 600;
-            line-height: 1.2;
         }
 
         .header-title .subtitle {
             font-size: 12px;
             color: var(--text-secondary);
             margin-top: 2px;
-        }
-
-        .header-actions {
-            display: flex;
-            gap: 8px;
         }
 
         .btn-icon {
@@ -118,19 +105,12 @@
             align-items: center;
             justify-content: center;
             transition: all 0.2s;
-            color: var(--text-secondary);
         }
 
         .btn-icon:hover {
             background: var(--bg-tertiary);
-            color: var(--text-primary);
         }
 
-        .btn-icon:active {
-            transform: scale(0.95);
-        }
-
-        /* FIXED: Main Layout */
         .main-container {
             position: fixed;
             top: var(--header-height);
@@ -141,7 +121,6 @@
             overflow: hidden;
         }
 
-        /* Sidebar */
         .sidebar {
             width: 280px;
             background: var(--bg-primary);
@@ -149,8 +128,6 @@
             display: flex;
             flex-direction: column;
             transition: transform 0.3s ease;
-            position: relative;
-            z-index: 90;
         }
 
         .sidebar.mobile-hidden {
@@ -160,7 +137,6 @@
         .sidebar-header {
             padding: 16px;
             border-bottom: 1px solid var(--border);
-            flex-shrink: 0;
         }
 
         .btn-new-chat {
@@ -177,41 +153,29 @@
             align-items: center;
             justify-content: center;
             gap: 8px;
-            transition: all 0.2s;
         }
 
         .btn-new-chat:hover {
             background: var(--primary-hover);
         }
 
-        .sidebar-sessions {
-            flex: 1;
-            overflow-y: auto;
-            padding: 8px;
-        }
-
-        /* FIXED: Chat Container */
         .chat-container {
             flex: 1;
             display: flex;
             flex-direction: column;
             background: var(--bg-secondary);
-            position: relative;
             overflow: hidden;
         }
 
-        /* FIXED: Messages Area */
         .messages-area {
             flex: 1;
             overflow-y: auto;
-            overflow-x: hidden;
             padding: 20px;
             display: flex;
             flex-direction: column;
             gap: 16px;
         }
 
-        /* Empty State */
         .empty-state {
             display: flex;
             flex-direction: column;
@@ -232,25 +196,16 @@
             justify-content: center;
             font-size: 40px;
             margin-bottom: 24px;
-            animation: float 3s ease-in-out infinite;
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-10px); }
         }
 
         .empty-state h2 {
             font-size: 24px;
             margin-bottom: 8px;
-            font-weight: 600;
         }
 
         .empty-state p {
             color: var(--text-secondary);
-            font-size: 15px;
             margin-bottom: 32px;
-            max-width: 400px;
         }
 
         .suggestions {
@@ -268,12 +223,10 @@
             padding: 16px;
             cursor: pointer;
             transition: all 0.2s;
-            text-align: left;
         }
 
         .suggestion-card:hover {
             border-color: var(--primary);
-            box-shadow: var(--shadow-md);
             transform: translateY(-2px);
         }
 
@@ -285,26 +238,17 @@
         .suggestion-text {
             font-size: 14px;
             font-weight: 500;
-            color: var(--text-primary);
         }
 
-        /* Message Bubbles */
         .message {
             display: flex;
             gap: 12px;
-            max-width: 100%;
-            animation: slideInMessage 0.3s ease;
+            animation: slideIn 0.3s ease;
         }
 
-        @keyframes slideInMessage {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         .message.user {
@@ -318,9 +262,8 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            flex-shrink: 0;
             font-weight: 600;
-            font-size: 14px;
+            flex-shrink: 0;
         }
 
         .message.user .message-avatar {
@@ -335,8 +278,6 @@
 
         .message-content {
             flex: 1;
-            max-width: calc(100% - 48px);
-            min-width: 0;
         }
 
         .message-bubble {
@@ -344,30 +285,24 @@
             border-radius: var(--radius-md);
             font-size: 15px;
             line-height: 1.6;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
         }
 
         .message.user .message-bubble {
             background: var(--primary);
             color: white;
-            border-bottom-right-radius: 4px;
         }
 
         .message.assistant .message-bubble {
             background: var(--bg-primary);
             border: 1px solid var(--border);
-            border-bottom-left-radius: 4px;
         }
 
         .message-time {
             font-size: 11px;
             color: var(--text-tertiary);
             margin-top: 4px;
-            padding: 0 4px;
         }
 
-        /* Thinking Indicator */
         .thinking-indicator {
             display: flex;
             align-items: center;
@@ -375,10 +310,7 @@
             padding: 12px 16px;
             background: var(--primary-light);
             border-radius: var(--radius-md);
-            font-size: 14px;
             color: var(--primary);
-            margin: 8px 0;
-            animation: slideInMessage 0.3s ease;
         }
 
         .thinking-dots {
@@ -391,18 +323,14 @@
             height: 6px;
             background: var(--primary);
             border-radius: 50%;
-            animation: bounce 1.4s infinite ease-in-out;
+            animation: bounce 1.4s infinite;
         }
-
-        .thinking-dot:nth-child(1) { animation-delay: -0.32s; }
-        .thinking-dot:nth-child(2) { animation-delay: -0.16s; }
 
         @keyframes bounce {
             0%, 80%, 100% { transform: scale(0); }
             40% { transform: scale(1); }
         }
 
-        /* Status Badge */
         .status-badge {
             display: inline-flex;
             align-items: center;
@@ -412,28 +340,18 @@
             border-radius: var(--radius-full);
             font-size: 12px;
             margin: 4px 0;
-            animation: slideInMessage 0.3s ease;
         }
 
-        .status-badge.worker {
-            background: rgba(16, 185, 129, 0.1);
-            color: var(--success);
-        }
-
-        /* FIXED: Input Area */
         .input-area {
-            position: relative;
             background: var(--bg-primary);
             border-top: 1px solid var(--border);
             padding: 16px 20px;
             box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
-            flex-shrink: 0;
         }
 
         .input-container {
             display: flex;
             gap: 12px;
-            align-items: flex-end;
             max-width: 900px;
             margin: 0 auto;
         }
@@ -454,26 +372,18 @@
             font-size: 15px;
             font-family: inherit;
             resize: none;
-            transition: all 0.2s;
             line-height: 1.5;
         }
 
         #messageInput:focus {
             outline: none;
             border-color: var(--primary);
-            background: var(--bg-primary);
-        }
-
-        #messageInput::placeholder {
-            color: var(--text-tertiary);
         }
 
         .input-actions {
             position: absolute;
             right: 8px;
             bottom: 8px;
-            display: flex;
-            gap: 4px;
         }
 
         .btn-send {
@@ -487,7 +397,6 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            transition: all 0.2s;
             font-size: 18px;
         }
 
@@ -500,11 +409,6 @@
             cursor: not-allowed;
         }
 
-        .btn-send:active:not(:disabled) {
-            transform: scale(0.95);
-        }
-
-        /* Modal */
         .modal-overlay {
             position: fixed;
             top: 0;
@@ -516,7 +420,6 @@
             align-items: center;
             justify-content: center;
             z-index: 1000;
-            padding: 20px;
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.3s;
@@ -534,32 +437,18 @@
             width: 100%;
             max-height: 80vh;
             overflow: hidden;
-            box-shadow: var(--shadow-lg);
-            transform: scale(0.9);
-            transition: transform 0.3s;
-        }
-
-        .modal-overlay.active .modal {
-            transform: scale(1);
         }
 
         .modal-header {
             padding: 20px;
             border-bottom: 1px solid var(--border);
             display: flex;
-            align-items: center;
             justify-content: space-between;
-        }
-
-        .modal-title {
-            font-size: 18px;
-            font-weight: 600;
         }
 
         .modal-body {
             padding: 20px;
             overflow-y: auto;
-            max-height: calc(80vh - 140px);
         }
 
         .modal-footer {
@@ -573,11 +462,9 @@
         .btn {
             padding: 10px 20px;
             border-radius: var(--radius-md);
-            font-size: 14px;
-            font-weight: 500;
             border: none;
             cursor: pointer;
-            transition: all 0.2s;
+            font-size: 14px;
         }
 
         .btn-primary {
@@ -585,20 +472,10 @@
             color: white;
         }
 
-        .btn-primary:hover {
-            background: var(--primary-hover);
-        }
-
         .btn-secondary {
             background: var(--bg-secondary);
-            color: var(--text-primary);
         }
 
-        .btn-secondary:hover {
-            background: var(--bg-tertiary);
-        }
-
-        /* Toast Notifications */
         .toast-container {
             position: fixed;
             top: 80px;
@@ -616,162 +493,28 @@
             padding: 16px;
             box-shadow: var(--shadow-lg);
             display: flex;
-            align-items: center;
             gap: 12px;
             min-width: 300px;
-            animation: slideIn 0.3s ease;
-        }
-
-        @keyframes slideIn {
-            from {
-                transform: translateX(400px);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
         }
 
         .toast.success { border-left: 4px solid var(--success); }
         .toast.error { border-left: 4px solid var(--error); }
-        .toast.warning { border-left: 4px solid var(--warning); }
 
-        .toast-icon {
-            font-size: 20px;
-        }
-
-        .toast-content {
-            flex: 1;
-        }
-
-        .toast-title {
-            font-weight: 500;
-            font-size: 14px;
-            margin-bottom: 2px;
-        }
-
-        .toast-message {
-            font-size: 13px;
-            color: var(--text-secondary);
-        }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: var(--border);
-            border-radius: var(--radius-full);
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--text-tertiary);
-        }
-
-        /* FIXED: Mobile Responsiveness */
         @media (max-width: 768px) {
-            :root {
-                --header-height: 56px;
-            }
-
-            .header {
-                padding: 0 16px;
-            }
-
-            .header-title h1 {
-                font-size: 16px;
-            }
-
-            .header-title .subtitle {
-                display: none;
-            }
-
             .sidebar {
                 position: absolute;
-                top: 0;
-                left: 0;
-                bottom: 0;
-                width: 280px;
-                max-width: 80vw;
                 z-index: 95;
             }
-
-            .messages-area {
-                padding: 16px 12px;
-            }
-
-            .input-area {
-                padding: 12px;
-            }
-
-            .empty-state-icon {
-                width: 60px;
-                height: 60px;
-                font-size: 30px;
-            }
-
-            .empty-state h2 {
-                font-size: 20px;
-            }
-
-            .suggestions {
-                grid-template-columns: 1fr;
-            }
-
-            .toast-container {
-                left: 20px;
-                right: 20px;
-                top: 70px;
-            }
-
-            .toast {
-                min-width: auto;
-            }
-
-            #messageInput {
-                max-height: 100px;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .logo {
-                width: 32px;
-                height: 32px;
-                font-size: 18px;
-            }
-
-            .btn-icon {
-                width: 36px;
-                height: 36px;
-            }
-
-            .message-avatar {
-                width: 32px;
-                height: 32px;
-                font-size: 12px;
-            }
-
-            .message-bubble {
-                padding: 10px 14px;
-                font-size: 14px;
+            .header-title .subtitle {
+                display: none;
             }
         }
     </style>
 </head>
 <body>
-    <!-- Header -->
     <header class="header">
         <div class="header-left">
-            <button class="btn-icon" id="toggleSidebar" aria-label="Toggle sidebar">
-                <span>☰</span>
-            </button>
+            <button class="btn-icon" id="toggleSidebar">☰</button>
             <div class="logo">O</div>
             <div class="header-title">
                 <h1>Orion AI</h1>
@@ -779,15 +522,11 @@
             </div>
         </div>
         <div class="header-actions">
-            <button class="btn-icon" id="settingsBtn" aria-label="Settings">
-                <span>⚙️</span>
-            </button>
+            <button class="btn-icon" id="settingsBtn">⚙️</button>
         </div>
     </header>
 
-    <!-- Main Container -->
     <div class="main-container">
-        <!-- Sidebar -->
         <aside class="sidebar mobile-hidden" id="sidebar">
             <div class="sidebar-header">
                 <button class="btn-new-chat" id="newChatBtn">
@@ -795,16 +534,11 @@
                     <span>New Chat</span>
                 </button>
             </div>
-            <div class="sidebar-sessions" id="sessionsList">
-                <!-- Sessions will be populated here -->
-            </div>
+            <div class="sidebar-sessions"></div>
         </aside>
 
-        <!-- Chat Container -->
         <main class="chat-container">
-            <!-- Messages Area -->
             <div class="messages-area" id="messagesArea">
-                <!-- Empty State -->
                 <div class="empty-state" id="emptyState">
                     <div class="empty-state-icon">🚀</div>
                     <h2>Welcome to Orion AI</h2>
@@ -822,7 +556,7 @@
                             <div class="suggestion-icon">✍️</div>
                             <div class="suggestion-text">Write a story</div>
                         </div>
-                        <div class="suggestion-card" data-prompt="Explain quantum computing">
+                        <div class="suggestion-card" data-prompt="Explain quantum computing simply">
                             <div class="suggestion-icon">🔬</div>
                             <div class="suggestion-text">Explain a topic</div>
                         </div>
@@ -830,20 +564,12 @@
                 </div>
             </div>
 
-            <!-- Input Area -->
             <div class="input-area">
                 <div class="input-container">
                     <div class="input-wrapper">
-                        <textarea 
-                            id="messageInput" 
-                            placeholder="Message Orion AI..." 
-                            rows="1"
-                            aria-label="Message input"
-                        ></textarea>
+                        <textarea id="messageInput" placeholder="Message Orion AI..." rows="1"></textarea>
                         <div class="input-actions">
-                            <button class="btn-send" id="sendBtn" aria-label="Send message">
-                                <span>➤</span>
-                            </button>
+                            <button class="btn-send" id="sendBtn">➤</button>
                         </div>
                     </div>
                 </div>
@@ -851,39 +577,22 @@
         </main>
     </div>
 
-    <!-- Settings Modal -->
     <div class="modal-overlay" id="settingsModal">
         <div class="modal">
             <div class="modal-header">
-                <h2 class="modal-title">Settings</h2>
-                <button class="btn-icon" id="closeSettings">
-                    <span>✕</span>
-                </button>
+                <h2>Settings</h2>
+                <button class="btn-icon" id="closeSettings">✕</button>
             </div>
             <div class="modal-body">
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; margin-bottom: 8px; font-weight: 500;">Worker URL</label>
-                    <input 
-                        type="text" 
-                        id="workerUrl" 
-                        value="http://localhost:8787"
-                        style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); font-size: 14px;"
-                    >
-                    <p style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
-                        The URL of your Orion worker deployment
-                    </p>
+                    <input type="text" id="workerUrl" value="http://localhost:8787" 
+                        style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px;">
                 </div>
-                <div style="margin-bottom: 20px;">
+                <div>
                     <label style="display: block; margin-bottom: 8px; font-weight: 500;">Session ID</label>
-                    <input 
-                        type="text" 
-                        id="sessionId" 
-                        readonly
-                        style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); font-size: 14px; background: var(--bg-secondary);"
-                    >
-                    <p style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
-                        Current session identifier (UUID)
-                    </p>
+                    <input type="text" id="sessionId" readonly
+                        style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary);">
                 </div>
             </div>
             <div class="modal-footer">
@@ -893,24 +602,21 @@
         </div>
     </div>
 
-    <!-- Toast Container -->
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
-        // FIXED: State Management
+        console.log('Orion AI initializing...');
+
         const state = {
             ws: null,
             sessionId: null,
             workerUrl: 'https://xorion.ubixsnow08.workers.dev',
             messages: [],
-            isConnected: false,
             isProcessing: false,
-            currentThinking: null,
-            currentStatus: null,
+            currentThinking: null
         };
 
-        // DOM Elements
-        const elements = {
+        const el = {
             sidebar: document.getElementById('sidebar'),
             toggleSidebar: document.getElementById('toggleSidebar'),
             newChatBtn: document.getElementById('newChatBtn'),
@@ -923,29 +629,16 @@
             emptyState: document.getElementById('emptyState'),
             messageInput: document.getElementById('messageInput'),
             sendBtn: document.getElementById('sendBtn'),
-            workerUrlInput: document.getElementById('workerUrl'),
-            sessionIdInput: document.getElementById('sessionId'),
-            toastContainer: document.getElementById('toastContainer'),
+            workerUrl: document.getElementById('workerUrl'),
+            sessionId: document.getElementById('sessionId'),
+            toastContainer: document.getElementById('toastContainer')
         };
 
-        // Utility Functions
         function generateUUID() {
             return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
                 const r = Math.random() * 16 | 0;
-                const v = c === 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
+                return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
             });
-        }
-
-        function formatTime(timestamp) {
-            const date = new Date(timestamp);
-            const now = new Date();
-            const diff = now - date;
-            
-            if (diff < 60000) return 'Just now';
-            if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-            if (diff < 86400000) return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         }
 
         function escapeHtml(text) {
@@ -954,31 +647,225 @@
             return div.innerHTML;
         }
 
-        function formatMessage(text) {
-            let formatted = escapeHtml(text);
-            formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            formatted = formatted.replace(/```([\s\S]*?)```/g, '<pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>');
-            formatted = formatted.replace(/`(.*?)`/g, '<code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; font-size: 0.9em;">$1</code>');
-            formatted = formatted.replace(/\n/g, '<br>');
-            return formatted;
-        }
-
-        // Toast Notifications
         function showToast(title, message, type = 'success') {
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
-            
-            const icon = type === 'success' ? '✓' : type === 'error' ? '✕' : '⚠';
-            
             toast.innerHTML = `
-                <div class="toast-icon">${icon}</div>
-                <div class="toast-content">
-                    <div class="toast-title">${escapeHtml(title)}</div>
-                    <div class="toast-message">${escapeHtml(message)}</div>
+                <div style="font-size: 20px;">${type === 'success' ? '✓' : '✕'}</div>
+                <div>
+                    <div style="font-weight: 500;">${escapeHtml(title)}</div>
+                    <div style="font-size: 13px; color: var(--text-secondary);">${escapeHtml(message)}</div>
                 </div>
             `;
+            el.toastContainer.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        function addMessage(role, content) {
+            console.log('Adding message:', role, content);
             
-            elements.toastContainer.appendChild(toast);
+            if (el.emptyState) {
+                el.emptyState.style.display = 'none';
+            }
+
+            const msg = document.createElement('div');
+            msg.className = `message ${role}`;
+            msg.innerHTML = `
+                <div class="message-avatar">${role === 'user' ? 'U' : 'O'}</div>
+                <div class="message-content">
+                    <div class="message-bubble">${escapeHtml(content)}</div>
+                    <div class="message-time">Just now</div>
+                </div>
+            `;
+            el.messagesArea.appendChild(msg);
+            el.messagesArea.scrollTop = el.messagesArea.scrollHeight;
+        }
+
+        function showThinking(text) {
+            if (state.currentThinking) {
+                state.currentThinking.remove();
+            }
+            state.currentThinking = document.createElement('div');
+            state.currentThinking.className = 'thinking-indicator';
+            state.currentThinking.innerHTML = `
+                <div class="thinking-dots">
+                    <div class="thinking-dot"></div>
+                    <div class="thinking-dot"></div>
+                    <div class="thinking-dot"></div>
+                </div>
+                <span>${escapeHtml(text)}</span>
+            `;
+            el.messagesArea.appendChild(state.currentThinking);
+            el.messagesArea.scrollTop = el.messagesArea.scrollHeight;
+        }
+
+        function hideThinking() {
+            if (state.currentThinking) {
+                state.currentThinking.remove();
+                state.currentThinking = null;
+            }
+        }
+
+        async function sendMessage(content) {
+            if (!content.trim() || state.isProcessing) {
+                console.log('Message empty or already processing');
+                return;
+            }
+
+            console.log('Sending message:', content);
             
-            setTimeout(() => {
-                toast.style.animation = 'slideIn 0.3s ease reverse';
+            state.isProcessing = true;
+            el.sendBtn.disabled = true;
+
+            addMessage('user', content);
+            el.messageInput.value = '';
+            el.messageInput.style.height = 'auto';
+
+            try {
+                showThinking('Processing your request...');
+
+                const url = `${state.workerUrl}/api/chat?session_id=${state.sessionId}`;
+                console.log('Fetching:', url);
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'X-Session-ID': state.sessionId
+                    },
+                    body: JSON.stringify({ message: content })
+                });
+
+                console.log('Response status:', response.status);
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+
+                const data = await response.json();
+                console.log('Response data:', data);
+
+                hideThinking();
+
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                addMessage('assistant', data.response || 'No response received');
+
+            } catch (error) {
+                console.error('Send error:', error);
+                hideThinking();
+                addMessage('assistant', `Error: ${error.message}`);
+                showToast('Error', error.message, 'error');
+            } finally {
+                state.isProcessing = false;
+                el.sendBtn.disabled = false;
+            }
+        }
+
+        // Event Listeners
+        el.toggleSidebar.addEventListener('click', () => {
+            console.log('Toggle sidebar clicked');
+            el.sidebar.classList.toggle('mobile-hidden');
+        });
+
+        el.newChatBtn.addEventListener('click', () => {
+            console.log('New chat clicked');
+            if (confirm('Start a new chat?')) {
+                state.sessionId = generateUUID();
+                localStorage.setItem('orion_session_id', state.sessionId);
+                el.sessionId.value = state.sessionId;
+                location.reload();
+            }
+        });
+
+        el.settingsBtn.addEventListener('click', () => {
+            console.log('Settings clicked');
+            el.settingsModal.classList.add('active');
+        });
+
+        el.closeSettings.addEventListener('click', () => {
+            el.settingsModal.classList.remove('active');
+        });
+
+        el.saveSettings.addEventListener('click', () => {
+            state.workerUrl = el.workerUrl.value;
+            localStorage.setItem('orion_worker_url', state.workerUrl);
+            el.settingsModal.classList.remove('active');
+            showToast('Settings Saved', 'Worker URL updated');
+        });
+
+        el.clearSession.addEventListener('click', async () => {
+            if (!confirm('Clear all session data?')) return;
+            try {
+                await fetch(`${state.workerUrl}/api/clear?session_id=${state.sessionId}`, {
+                    method: 'POST'
+                });
+                location.reload();
+            } catch (e) {
+                showToast('Error', 'Failed to clear session', 'error');
+            }
+        });
+
+        el.messageInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        });
+
+        el.messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                console.log('Enter pressed');
+                sendMessage(el.messageInput.value);
+            }
+        });
+
+        el.sendBtn.addEventListener('click', () => {
+            console.log('Send button clicked');
+            sendMessage(el.messageInput.value);
+        });
+
+        // Suggestion cards
+        document.querySelectorAll('.suggestion-card').forEach(card => {
+            card.addEventListener('click', () => {
+                const prompt = card.dataset.prompt;
+                console.log('Suggestion clicked:', prompt);
+                sendMessage(prompt);
+            });
+        });
+
+        el.settingsModal.addEventListener('click', (e) => {
+            if (e.target === el.settingsModal) {
+                el.settingsModal.classList.remove('active');
+            }
+        });
+
+        // Initialize
+        function init() {
+            console.log('Starting initialization...');
+
+            const savedUrl = localStorage.getItem('orion_worker_url');
+            if (savedUrl) {
+                state.workerUrl = savedUrl;
+                el.workerUrl.value = savedUrl;
+            }
+
+            state.sessionId = localStorage.getItem('orion_session_id') || generateUUID();
+            localStorage.setItem('orion_session_id', state.sessionId);
+            el.sessionId.value = state.sessionId;
+
+            if (window.innerWidth <= 768) {
+                el.sidebar.classList.add('mobile-hidden');
+            }
+
+            console.log('Initialized with session:', state.sessionId);
+            console.log('Worker URL:', state.workerUrl);
+            console.log('Ready to send messages!');
+        }
+
+        init();
+    </script>
+</body>
+</html>
