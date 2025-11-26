@@ -246,6 +246,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     }
   }
 
+  /////////////////////////////////////////////////////////////////
   async executeAdminLoop(
     userMessage: string,
     images?: Array<{ data: string; mimeType: string }>,
@@ -267,6 +268,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     const startTime = Date.now();
     this.metrics.totalRequests++;
     callbacks?.onStatus?.('Analyzing your request...');
+    
     await this.saveMessage('user', userMessage);
     const files = await this.gemini.listFiles();
     const userPrompt = buildAdminUserPrompt(userMessage, {
@@ -276,73 +278,123 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       conversationLength: this.storage.getMessages().length,
       memoryAvailable: !!this.memory,
     });
+    
     const artifacts: Artifact[] = [];
     const toolsUsed = new Set<string>();
     let turn = 0;
     const maxTurns = 10;
     let totalThinkingTokens = 0;
     const conversationHistory = this.formatContextForGemini(this.storage.getMessages().slice(-10));
+    
     while (turn < maxTurns) {
       turn++;
       this.metrics.adminTurns++;
       callbacks?.onStatus?.(`Processing (turn ${turn}/${maxTurns})...`);
+      
       const messages = [
         { role: 'system', content: this.adminSystemInstruction },
         ...conversationHistory,
         { role: 'user', content: turn === 1 ? userPrompt : 'Continue with your task.' },
       ];
-      const response = await this.gemini.generateWithNativeTools(messages, {
-        stream: true,
-        temperature: 1.0,
-        thinkingConfig: { thinkingBudget: 8192, includeThoughts: true },
-        useSearch: true,
-        useMaps: false,
-        useCodeExecution: true,
-        useFileSearch: files.length > 0,
-        images: turn === 1 ? images : undefined,
-        files: files.length > 0 ? files : undefined,
-        maxOutputTokens: 8192,
-      });
+      
+      // ============================================================
+      // ✅ TRUE REAL-TIME STREAMING: Pass callbacks directly to Gemini
+      // ============================================================
+      const response = await this.gemini.generateWithNativeTools(
+        messages,
+        {
+          stream: true,
+          temperature: 1.0,
+          thinkingConfig: { thinkingBudget: 8192, includeThoughts: true },
+          useSearch: true,
+          useMaps: false,
+          useCodeExecution: true,
+          useFileSearch: files.length > 0,
+          images: turn === 1 ? images : undefined,
+          files: files.length > 0 ? files : undefined,
+          maxOutputTokens: 8192,
+        },
+        callbacks?.onChunk,    // ✅ Stream text chunks in real-time
+        callbacks?.onThought   // ✅ Stream thinking in real-time
+      );
+      
+      // Track usage metadata
       if (response.usageMetadata) {
         totalThinkingTokens += response.usageMetadata.totalTokens || 0;
         this.metrics.thinkingTokensUsed += response.usageMetadata.totalTokens || 0;
       }
-      if (response.thinking && callbacks?.onThought) callbacks.onThought(response.thinking);
+      
+      // Track tool usage
       if (response.searchResults) {
         this.metrics.nativeToolCalls++;
         toolsUsed.add('google_search');
-        callbacks?.onToolUse?.('google_search', { query: 'automatic', results: response.searchResults.length });
+        callbacks?.onToolUse?.('google_search', { 
+          query: 'automatic', 
+          results: response.searchResults.length 
+        });
       }
+      
       if (response.codeExecutionResults) {
         this.metrics.nativeToolCalls++;
         toolsUsed.add('code_execution');
-        callbacks?.onToolUse?.('code_execution', { executed: response.codeExecutionResults.length });
+        callbacks?.onToolUse?.('code_execution', { 
+          executed: response.codeExecutionResults.length 
+        });
       }
+      
+      // Parse the response to determine next action
       const parsed = this.parseAdminResponse(response.text, response);
+      
       switch (parsed.action) {
         case 'respond': {
           const fullResponse = parsed.content;
           await this.saveMessage('model', fullResponse);
-          if (this.memory) this.saveToMemory(userMessage, fullResponse).catch(() => {});
+          
+          // Save to memory (background)
+          if (this.memory) {
+            this.saveToMemory(userMessage, fullResponse).catch(() => {});
+          }
+          
+          // Sync to D1 (background)
           this.syncToD1().catch(() => {});
-          return { response: fullResponse, artifacts, turnsUsed: turn, toolsUsed: Array.from(toolsUsed), thinkingTokens: totalThinkingTokens };
+          
+          return { 
+            response: fullResponse, 
+            artifacts, 
+            turnsUsed: turn, 
+            toolsUsed: Array.from(toolsUsed), 
+            thinkingTokens: totalThinkingTokens 
+          };
         }
+        
         case 'memory_search': {
           callbacks?.onStatus?.('Searching conversation memory...');
           toolsUsed.add('memory_search');
           const memoryResults = await this.performMemorySearch(parsed.memoryQuery || '');
-          conversationHistory.push({ role: 'user', content: `<memory_results>\n${memoryResults}\n</memory_results>` });
+          conversationHistory.push({ 
+            role: 'user', 
+            content: `<memory_results>\n${memoryResults}\n</memory_results>` 
+          });
           break;
         }
+        
         case 'delegate': {
           if (!parsed.delegation) {
-            conversationHistory.push({ role: 'user', content: '<error>Invalid delegation format. Please correct and try again.</error>' });
+            conversationHistory.push({ 
+              role: 'user', 
+              content: '<error>Invalid delegation format. Please correct and try again.</error>' 
+            });
             break;
           }
+          
           callbacks?.onStatus?.(`Delegating to ${parsed.delegation.workerType}...`);
           this.metrics.delegations++;
           toolsUsed.add(`worker_${parsed.delegation.workerType}`);
+          
+          // Execute worker task
           const workerResult = await this.executeWorkerLoop(parsed.delegation, callbacks);
+          
+          // Handle artifacts
           if (workerResult.success && workerResult.artifactId) {
             const artifact = this.storage.getArtifacts().find((a) => a.id === workerResult.artifactId);
             if (artifact) {
@@ -350,21 +402,40 @@ export class OrionAgent extends DurableObject implements OrionRPC {
               callbacks?.onArtifact?.(artifact);
             }
           }
+          
+          // Track worker tools
           workerResult.toolsUsed.forEach((t) => toolsUsed.add(t));
+          
+          // Add worker result to conversation history
           const workerSummary = workerResult.success
             ? `<worker_result status="success">\nWorker: ${parsed.delegation.workerType}\nSummary: ${workerResult.summary}\nArtifact ID: ${workerResult.artifactId}\nTools Used: ${workerResult.toolsUsed.join(', ')}\n</worker_result>`
             : `<worker_result status="failed">\nWorker: ${parsed.delegation.workerType}\nError: ${workerResult.error}\n</worker_result>`;
+          
           conversationHistory.push({ role: 'user', content: workerSummary });
           break;
         }
       }
+      
+      // Add assistant response to history
       conversationHistory.push({ role: 'assistant', content: response.text });
     }
+    
+    // Max turns reached
     const timeoutResponse = 'I reached my processing limit while working on your request. Let me summarize what I was able to accomplish so far...';
     await this.saveMessage('model', timeoutResponse);
-    return { response: timeoutResponse, artifacts, turnsUsed: turn, toolsUsed: Array.from(toolsUsed), thinkingTokens: totalThinkingTokens };
+    
+    return { 
+      response: timeoutResponse, 
+      artifacts, 
+      turnsUsed: turn, 
+      toolsUsed: Array.from(toolsUsed), 
+      thinkingTokens: totalThinkingTokens 
+    };
   }
+  
 
+
+///////////////////////////////////////////////////////////////////
   private async executeWorkerLoop(
     envelope: TaskEnvelope,
     callbacks?: { onStatus?: (msg: string) => void; onWorkerProgress?: (event: WSOutgoingMessage) => void }
