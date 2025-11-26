@@ -175,7 +175,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       metrics: this.metrics,
       nativeTools: {
         googleSearch: true,
-        googleMaps: true,
+        googleMaps: false,
         codeExecution: true,
         urlContext: true,
         fileSearch: true,
