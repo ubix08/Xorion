@@ -1,8 +1,9 @@
-// src/index.ts - Orion Worker Entry Point (REFACTORED)
+// src/index.ts - Worker with RPC Implementation
 
 import { OrionAgent } from './durable-agent';
 import { D1Manager } from './storage/d1-manager';
-import type { Env } from './types';
+import type { Env, OrionRPC } from './types';
+import type { DurableObjectStub } from '@cloudflare/workers-types';
 
 export { OrionAgent };
 
@@ -12,15 +13,18 @@ export { OrionAgent };
 
 function getSessionId(request: Request): string | null {
   const url = new URL(request.url);
-  return url.searchParams.get('session_id') || 
-         request.headers.get('X-Session-ID') || 
-         null;
+  return (
+    url.searchParams.get('session_id') || request.headers.get('X-Session-ID') || null
+  );
 }
 
 function jsonResponse(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    },
   });
 }
 
@@ -47,7 +51,8 @@ async function verifyAuth(request: Request, env: Env): Promise<boolean> {
 }
 
 function isValidSessionId(sessionId: string): boolean {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   return uuidRegex.test(sessionId);
 }
 
@@ -57,7 +62,10 @@ function isValidSessionId(sessionId: string): boolean {
 
 async function handleLogin(request: Request, env: Env): Promise<Response> {
   try {
-    const { email, password } = await request.json() as { email: string; password: string };
+    const { email, password } = (await request.json()) as {
+      email: string;
+      password: string;
+    };
 
     if (!email || !password) {
       return errorResponse('Email & password required', 400);
@@ -68,9 +76,12 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     }
 
     const encoder = new TextEncoder();
-    const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(password));
+    const hashBuffer = await crypto.subtle.digest(
+      'SHA-256',
+      encoder.encode(password)
+    );
     const hashHex = Array.from(new Uint8Array(hashBuffer))
-      .map(b => b.toString(16).padStart(2, '0'))
+      .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
 
     if (env.ADMIN_PASSWORD_HASH && hashHex !== env.ADMIN_PASSWORD_HASH) {
@@ -78,11 +89,13 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     }
 
     const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-    const payload = btoa(JSON.stringify({
-      email,
-      iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
-    }));
+    const payload = btoa(
+      JSON.stringify({
+        email,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
+      })
+    );
 
     const secret = env.JWT_SECRET || 'default-secret';
     const sigBuffer = await crypto.subtle.digest(
@@ -108,7 +121,7 @@ async function handleSessionList(env: Env): Promise<Response> {
 async function handleSessionCreate(request: Request, env: Env): Promise<Response> {
   if (!env.DB) return errorResponse('D1 not configured', 400);
 
-  const { title } = await request.json() as { title?: string };
+  const { title } = (await request.json()) as { title?: string };
   const sessionId = crypto.randomUUID();
 
   const d1 = new D1Manager(env.DB);
@@ -145,10 +158,7 @@ async function handleD1Status(env: Env): Promise<Response> {
   }
 
   const d1 = new D1Manager(env.DB);
-  const [healthy, stats] = await Promise.all([
-    d1.healthCheck(),
-    d1.getStats(),
-  ]);
+  const [healthy, stats] = await Promise.all([d1.healthCheck(), d1.getStats()]);
 
   return jsonResponse({
     enabled: true,
@@ -159,10 +169,10 @@ async function handleD1Status(env: Env): Promise<Response> {
 }
 
 // =============================================================
-// Durable Object Routing
+// RPC Routing to Durable Object
 // =============================================================
 
-async function routeToDurableObject(
+async function routeToRPC(
   request: Request,
   env: Env,
   ctx: ExecutionContext
@@ -181,6 +191,124 @@ async function routeToDurableObject(
   }
 
   try {
+    // Get Durable Object stub with RPC interface
+    const id = env.AGENT.idFromName(`session:${sessionId}`);
+    const stub = env.AGENT.get(id) as DurableObjectStub<OrionRPC>;
+
+    // Ensure session exists in D1 (background)
+    if (env.DB) {
+      ctx.waitUntil(
+        (async () => {
+          const d1 = new D1Manager(env.DB!);
+          const existing = await d1.getSession(sessionId);
+          if (!existing) {
+            await d1.createSession(sessionId);
+          }
+        })().catch((e) => console.error('[Worker] Session ensure failed:', e))
+      );
+    }
+
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Route to RPC methods
+    switch (path) {
+      case '/api/chat':
+        if (request.method === 'POST') {
+          const { message, images } = await request.json();
+          const result = await stub.chat(message, images);
+          return jsonResponse(result);
+        }
+        break;
+
+      case '/api/history':
+        if (request.method === 'GET') {
+          const result = await stub.getHistory();
+          return jsonResponse(result);
+        }
+        break;
+
+      case '/api/artifacts':
+        if (request.method === 'GET') {
+          const result = await stub.getArtifacts();
+          return jsonResponse(result);
+        }
+        break;
+
+      case '/api/clear':
+        if (request.method === 'POST') {
+          const result = await stub.clear();
+          return jsonResponse(result);
+        }
+        break;
+
+      case '/api/status':
+        if (request.method === 'GET') {
+          const result = await stub.getStatus();
+          return jsonResponse(result);
+        }
+        break;
+
+      case '/api/upload':
+        if (request.method === 'POST') {
+          const formData = await request.formData();
+          const file = formData.get('file') as File;
+          if (!file) return errorResponse('No file provided', 400);
+
+          const buffer = await file.arrayBuffer();
+          const base64 = btoa(
+            String.fromCharCode(...new Uint8Array(buffer))
+          );
+
+          const result = await stub.uploadFile(base64, file.type, file.name);
+          return jsonResponse(result);
+        }
+        break;
+
+      case '/api/files':
+        if (request.method === 'GET') {
+          const result = await stub.listFiles();
+          return jsonResponse(result);
+        }
+        break;
+
+      case '/api/files/delete':
+        if (request.method === 'POST') {
+          const { fileUri } = await request.json();
+          if (!fileUri) return errorResponse('fileUri required', 400);
+          const result = await stub.deleteFile(fileUri);
+          return jsonResponse(result);
+        }
+        break;
+    }
+
+    return new Response('Not Found', { status: 404 });
+  } catch (err: any) {
+    console.error('[Worker] RPC error:', err);
+    return errorResponse(err.message || 'RPC call failed', 500);
+  }
+}
+
+// =============================================================
+// WebSocket Routing to Durable Object
+// =============================================================
+
+async function routeToWebSocket(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<Response> {
+  const sessionId = getSessionId(request);
+
+  if (!sessionId) {
+    return errorResponse('Session ID required for WebSocket', 400);
+  }
+
+  if (!isValidSessionId(sessionId)) {
+    return errorResponse('Invalid session ID format', 400);
+  }
+
+  try {
     // Get Durable Object stub
     const id = env.AGENT.idFromName(`session:${sessionId}`);
     const stub = env.AGENT.get(id);
@@ -189,30 +317,20 @@ async function routeToDurableObject(
     if (env.DB) {
       ctx.waitUntil(
         (async () => {
-          const d1 = new D1Manager(env.DB);
+          const d1 = new D1Manager(env.DB!);
           const existing = await d1.getSession(sessionId);
           if (!existing) {
             await d1.createSession(sessionId);
           }
-        })().catch(e => console.error('[Worker] Session ensure failed:', e))
+        })().catch((e) => console.error('[Worker] Session ensure failed:', e))
       );
     }
 
-    // Forward request with session ID
-    const url = new URL(request.url);
-    const headers = new Headers(request.headers);
-    headers.set('X-Session-ID', sessionId);
-
-    const forwardedRequest = new Request(url.toString(), {
-      method: request.method,
-      headers: headers,
-      body: request.body,
-    });
-
-    return await stub.fetch(forwardedRequest);
+    // Forward WebSocket upgrade to Durable Object
+    return await stub.fetch(request);
   } catch (err: any) {
-    console.error('[Worker] DO routing error:', err);
-    return errorResponse(err.message || 'Durable Object Error', 500);
+    console.error('[Worker] WebSocket routing error:', err);
+    return errorResponse(err.message || 'WebSocket routing failed', 500);
   }
 }
 
@@ -221,7 +339,11 @@ async function routeToDurableObject(
 // =============================================================
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -239,7 +361,7 @@ export default {
 
     // Public paths
     const publicPaths = ['/auth/', '/health', '/'];
-    const isPublic = publicPaths.some(p => path.startsWith(p));
+    const isPublic = publicPaths.some((p) => path.startsWith(p));
 
     // Auth check
     if (env.JWT_SECRET && !isPublic) {
@@ -264,9 +386,9 @@ export default {
 
         return jsonResponse({
           status: 'ok',
-          name: 'Orion Multi-Agent System (Refactored)',
-          version: '3.0.0',
-          architecture: 'DO Orchestrator Pattern',
+          name: 'Orion Multi-Agent System',
+          version: '4.0.0',
+          architecture: 'RPC + Native WebSockets',
           d1: d1Status,
           authEnabled: !!env.JWT_SECRET,
         });
@@ -291,23 +413,19 @@ export default {
       if (path.startsWith('/api/sessions/')) {
         const sessionId = path.split('/').pop()!;
         if (request.method === 'GET') return handleSessionGet(sessionId, env);
-        if (request.method === 'DELETE') return handleSessionDelete(sessionId, env);
+        if (request.method === 'DELETE')
+          return handleSessionDelete(sessionId, env);
       }
 
-      // All other /api/* routes go to Durable Object
+      // WebSocket upgrade - forward to Durable Object
+      const upgradeHeader = request.headers.get('Upgrade');
+      if (upgradeHeader?.toLowerCase() === 'websocket') {
+        return await routeToWebSocket(request, env, ctx);
+      }
+
+      // All other /api/* routes use RPC
       if (path.startsWith('/api/')) {
-        const response = await routeToDurableObject(request, env, ctx);
-        
-        // Add CORS headers
-        const newHeaders = new Headers(response.headers);
-        Object.entries(corsHeaders).forEach(([k, v]) => newHeaders.set(k, v));
-        
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: newHeaders,
-          webSocket: (response as any).webSocket,
-        });
+        return await routeToRPC(request, env, ctx);
       }
 
       return new Response('Not Found', { status: 404 });
