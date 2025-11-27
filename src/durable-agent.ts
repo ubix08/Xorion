@@ -14,7 +14,7 @@ import {
   buildAdminUserPrompt,
   buildWorkerSystemInstruction,
   buildWorkerTaskPrompt,
-} from './admin/unified-xml-prompts'; // ✅ NEW: Updated prompts
+} from './admin/admin-prompts'; // ✅ NEW: Updated prompts
 import { WorkspaceManager } from './workspace/workspace-manager'; // ✅ NEW
 import { XMLToolParser, XMLToolExecutor, type ToolExecutionResult } from './tools/xml-tool-executor'; // ✅ NEW
 
