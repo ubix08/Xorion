@@ -1,6 +1,6 @@
 // src/workspace/workspace-manager.ts - Project-based Workspace Management
 
-import { Workspace } from './workspace';
+import { B2Workspace } from './workspace';
 
 export interface Project {
   name: string;
@@ -24,8 +24,23 @@ export interface ProjectStructure {
 export class WorkspaceManager {
   private readonly ACTIVE_PROJECTS_FILE = 'active-projects.json';
   private readonly PROJECTS_ROOT = 'projects';
+  private workspace: B2Workspace | null = null;
 
   constructor() {}
+
+  private getWorkspace(): B2Workspace {
+    if (!this.workspace) {
+      throw new Error('Workspace not initialized - B2 credentials required');
+    }
+    return this.workspace;
+  }
+
+  // Initialize with environment
+  init(env: any): void {
+    if (env.B2_KEY_ID && env.B2_APPLICATION_KEY && env.B2_S3_ENDPOINT && env.B2_BUCKET) {
+      this.workspace = new B2Workspace(env);
+    }
+  }
 
   // =============================================================
   // Project Management
@@ -35,13 +50,15 @@ export class WorkspaceManager {
    * List all active projects from active-projects.json
    */
   async listProjects(): Promise<Project[]> {
+    if (!this.workspace) return [];
+    
     try {
-      const exists = await Workspace.exists(this.ACTIVE_PROJECTS_FILE);
+      const exists = await this.workspace.exists(this.ACTIVE_PROJECTS_FILE);
       if (!exists) {
         return [];
       }
 
-      const content = await Workspace.readFileText(this.ACTIVE_PROJECTS_FILE);
+      const content = await this.workspace.read(this.ACTIVE_PROJECTS_FILE);
       return JSON.parse(content) as Project[];
     } catch (error) {
       console.error('[Workspace] Failed to list projects:', error);
@@ -65,27 +82,28 @@ export class WorkspaceManager {
     title: string,
     initialNotes?: string
   ): Promise<Project> {
+    const ws = this.getWorkspace();
     const kebabName = this.toKebabCase(name);
     const projectPath = `${this.PROJECTS_ROOT}/${kebabName}`;
 
     // Create project directory structure
-    await Workspace.mkdir(`${projectPath}/`);
-    await Workspace.mkdir(`${projectPath}/artifacts/`);
+    await ws.mkdir(`${projectPath}/`);
+    await ws.mkdir(`${projectPath}/artifacts/`);
 
     // Create initial files
     const now = new Date().toISOString().split('T')[0];
 
-    await Workspace.writeFile(
+    await ws.write(
       `${projectPath}/status.md`,
       `# ${title}\n\n**Status:** Active\n**Created:** ${now}\n\n## Current Progress\n\nProject initialized.\n\n## Next Steps\n\n- Define project scope\n- Create initial tasks\n`
     );
 
-    await Workspace.writeFile(
+    await ws.write(
       `${projectPath}/todo.md`,
       `# TODO - ${title}\n\n## High Priority\n\n- [ ] Define project scope\n\n## Medium Priority\n\n## Low Priority\n\n## Completed\n\n`
     );
 
-    await Workspace.writeFile(
+    await ws.write(
       `${projectPath}/notes.md`,
       `# Notes - ${title}\n\n${initialNotes || 'Project notes and research snippets go here.'}\n`
     );
@@ -111,6 +129,7 @@ export class WorkspaceManager {
     projectName: string,
     updates: Partial<Pick<Project, 'title' | 'status' | 'progress'>>
   ): Promise<Project> {
+    const ws = this.getWorkspace();
     const projects = await this.listProjects();
     const index = projects.findIndex(p => p.name === projectName);
 
@@ -126,7 +145,7 @@ export class WorkspaceManager {
 
     projects[index] = updated;
 
-    await Workspace.writeFile(
+    await ws.write(
       this.ACTIVE_PROJECTS_FILE,
       JSON.stringify(projects, null, 2)
     );
@@ -159,8 +178,9 @@ export class WorkspaceManager {
    * Update status.md file
    */
   async updateStatus(projectName: string, statusContent: string): Promise<void> {
+    const ws = this.getWorkspace();
     const projectPath = `${this.PROJECTS_ROOT}/${projectName}`;
-    await Workspace.writeFile(`${projectPath}/status.md`, statusContent);
+    await ws.write(`${projectPath}/status.md`, statusContent);
 
     // Update lastUpdated in registry
     await this.updateProject(projectName, {
@@ -172,18 +192,20 @@ export class WorkspaceManager {
    * Update todo.md file
    */
   async updateTodo(projectName: string, todoContent: string): Promise<void> {
+    const ws = this.getWorkspace();
     const projectPath = `${this.PROJECTS_ROOT}/${projectName}`;
-    await Workspace.writeFile(`${projectPath}/todo.md`, todoContent);
+    await ws.write(`${projectPath}/todo.md`, todoContent);
   }
 
   /**
    * Append to notes.md file
    */
   async appendNote(projectName: string, note: string): Promise<void> {
+    const ws = this.getWorkspace();
     const projectPath = `${this.PROJECTS_ROOT}/${projectName}`;
     const timestamp = new Date().toISOString();
     const noteEntry = `\n\n---\n**${timestamp}**\n\n${note}\n`;
-    await Workspace.appendFile(`${projectPath}/notes.md`, noteEntry);
+    await ws.append(`${projectPath}/notes.md`, noteEntry);
   }
 
   // =============================================================
@@ -199,10 +221,17 @@ export class WorkspaceManager {
     content: string | ArrayBuffer | Uint8Array,
     mimeType = 'text/plain'
   ): Promise<string> {
+    const ws = this.getWorkspace();
     const projectPath = `${this.PROJECTS_ROOT}/${projectName}`;
     const artifactPath = `${projectPath}/artifacts/${filename}`;
 
-    await Workspace.writeFile(artifactPath, content, mimeType);
+    const contentStr = typeof content === 'string' 
+      ? content 
+      : content instanceof Uint8Array 
+        ? content 
+        : new Uint8Array(content);
+
+    await ws.write(artifactPath, contentStr, mimeType);
 
     return artifactPath;
   }
@@ -211,10 +240,12 @@ export class WorkspaceManager {
    * List all artifacts in a project
    */
   async listArtifacts(projectName: string): Promise<string[]> {
+    if (!this.workspace) return [];
+    
     try {
       const projectPath = `${this.PROJECTS_ROOT}/${projectName}`;
-      const files = await Workspace.readdir(`${projectPath}/artifacts/`);
-      return files.filter(f => !f.endsWith('/'));
+      const result = await this.workspace.ls(`${projectPath}/artifacts/`);
+      return result.files.map(f => f.name);
     } catch (error) {
       console.error('[Workspace] Failed to list artifacts:', error);
       return [];
@@ -225,16 +256,18 @@ export class WorkspaceManager {
    * Read an artifact
    */
   async readArtifact(projectName: string, filename: string): Promise<string> {
+    const ws = this.getWorkspace();
     const projectPath = `${this.PROJECTS_ROOT}/${projectName}`;
-    return await Workspace.readFileText(`${projectPath}/artifacts/${filename}`);
+    return await ws.read(`${projectPath}/artifacts/${filename}`);
   }
 
   /**
    * Delete an artifact
    */
   async deleteArtifact(projectName: string, filename: string): Promise<void> {
+    const ws = this.getWorkspace();
     const projectPath = `${this.PROJECTS_ROOT}/${projectName}`;
-    await Workspace.unlink(`${projectPath}/artifacts/${filename}`);
+    await ws.rm(`${projectPath}/artifacts/${filename}`);
   }
 
   // =============================================================
@@ -286,6 +319,7 @@ export class WorkspaceManager {
   // =============================================================
 
   private async updateProjectRegistry(project: Project): Promise<void> {
+    const ws = this.getWorkspace();
     const projects = await this.listProjects();
     const existing = projects.findIndex(p => p.name === project.name);
 
@@ -295,15 +329,17 @@ export class WorkspaceManager {
       projects.push(project);
     }
 
-    await Workspace.writeFile(
+    await ws.write(
       this.ACTIVE_PROJECTS_FILE,
       JSON.stringify(projects, null, 2)
     );
   }
 
   private async safeReadFile(path: string, fallback: string): Promise<string> {
+    if (!this.workspace) return fallback;
+    
     try {
-      return await Workspace.readFileText(path);
+      return await this.workspace.read(path);
     } catch {
       return fallback;
     }
