@@ -1,4 +1,4 @@
-// src/types.ts - Complete Type Definitions
+// src/types.ts - Updated with Workspace and XML Tool Types
 
 import type { DurableObjectNamespace, D1Database, VectorizeIndex } from '@cloudflare/workers-types';
 
@@ -14,10 +14,13 @@ export interface Env {
   JWT_SECRET?: string;
   ADMIN_GMAIL?: string;
   ADMIN_PASSWORD_HASH?: string;
+  // ✅ NEW: Workspace credentials
+  B2_KEY_ID?: string;
+  B2_KEY_SECRET?: string;
 }
 
 // =============================================================
-// RPC Interface (for type-safe Durable Object calls)
+// RPC Interface
 // =============================================================
 
 export interface OrionRPC {
@@ -50,6 +53,7 @@ export interface StatusResponse {
   metrics: AgentMetrics;
   nativeTools: Record<string, boolean>;
   memory: MemoryMetrics | null;
+  workspace?: WorkspaceMetrics; // ✅ NEW
 }
 
 export interface AgentMetrics {
@@ -59,12 +63,25 @@ export interface AgentMetrics {
   adminTurns: number;
   workerTurns: number;
   thinkingTokensUsed: number;
+  workspaceOperations?: number; // ✅ NEW
+  memorySearches?: number; // ✅ NEW
+  knowledgeSearches?: number; // ✅ NEW
 }
 
 export interface MemoryMetrics {
-  totalEntries: number;
-  searchCount: number;
-  lastSearchTime?: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheHitRate: number;
+  totalEmbeddings: number;
+  totalSearches: number;
+  cacheSize: number;
+}
+
+// ✅ NEW: Workspace Metrics
+export interface WorkspaceMetrics {
+  enabled: boolean;
+  projectCount: number;
+  activeProjects: number;
 }
 
 // =============================================================
@@ -118,6 +135,7 @@ export interface Artifact {
     language?: string;
     confidence?: 'high' | 'medium' | 'low';
     toolsUsed?: string[];
+    projectName?: string; // ✅ NEW: Link to workspace project
   };
 }
 
@@ -185,15 +203,27 @@ export type WSOutgoingMessage =
   | { type: 'pong' };
 
 // =============================================================
-// Session
+// Session & State
 // =============================================================
 
 export interface Session {
-  id: string;
+  sessionId: string;
   title: string;
   createdAt: number;
-  updatedAt: number;
-  messageCount?: number;
+  lastActivityAt: number;
+  messageCount: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AgentState {
+  sessionId: string;
+  conversationHistory: Message[];
+  context: {
+    files: FileMetadata[];
+    searchResults: any[];
+    activeProject?: string; // ✅ NEW
+  };
+  lastActivityAt: number;
 }
 
 // =============================================================
@@ -204,11 +234,212 @@ export interface WorkerConfig {
   type: WorkerType;
   name: string;
   description: string;
+  systemPrompt?: string;
   capabilities: string[];
   tools: Array<{
     name: string;
     enabled: boolean;
   }>;
+  outputFormat?: {
+    type: string;
+    maxLength: number;
+  };
   maxTurns: number;
   temperature: number;
+}
+
+// =============================================================
+// ✅ NEW: Workspace Types
+// =============================================================
+
+export interface Project {
+  name: string;
+  title: string;
+  status: 'active' | 'paused' | 'completed';
+  progress: string;
+  lastUpdated: string;
+}
+
+export interface ProjectStructure {
+  statusMd: string;
+  todoMd: string;
+  notesMd: string;
+  artifacts: string[];
+}
+
+export interface WorkspaceFile {
+  path: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  lastModified: number;
+}
+
+// =============================================================
+// ✅ NEW: Memory Types (Previously Missing)
+// =============================================================
+
+export interface MemoryEntry {
+  id?: string;
+  content: string;
+  type: 'conversation' | 'artifact' | 'decision' | 'fact';
+  importance: number;
+  timestamp: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface MemorySearchResult {
+  id: string;
+  content: string;
+  score: number;
+  metadata: Record<string, unknown>;
+}
+
+// =============================================================
+// ✅ NEW: Tool Execution Types
+// =============================================================
+
+export interface ToolCall {
+  toolName: 'memory_search' | 'knowledge_search' | 'workspace' | 'delegate_worker';
+  params: Record<string, any>;
+  rawXml: string;
+}
+
+export interface ToolResult {
+  success: boolean;
+  toolName: string;
+  result?: string;
+  error?: string;
+  metadata?: Record<string, any>;
+}
+
+// =============================================================
+// API Request/Response Types
+// =============================================================
+
+export interface ChatRequest {
+  message: string;
+  images?: Array<{
+    data: string;
+    mimeType: string;
+  }>;
+  sessionId?: string;
+}
+
+export interface HistoryResponse {
+  messages: Message[];
+  sessionId: string;
+}
+
+export interface ArtifactsResponse {
+  artifacts: Artifact[];
+  sessionId: string;
+}
+
+export interface FileUploadRequest {
+  file: File | Blob;
+  name: string;
+  mimeType: string;
+}
+
+export interface FileUploadResponse {
+  success: boolean;
+  file: FileMetadata;
+}
+
+export interface FilesListResponse {
+  files: FileMetadata[];
+}
+
+// ✅ NEW: Workspace API Types
+export interface ProjectsListResponse {
+  projects: Project[];
+}
+
+export interface ProjectResponse {
+  project: Project;
+  structure: ProjectStructure;
+}
+
+export interface ProjectCreateRequest {
+  name: string;
+  title: string;
+  initialNotes?: string;
+}
+
+export interface ProjectUpdateRequest {
+  projectName: string;
+  updates: {
+    title?: string;
+    status?: 'active' | 'paused' | 'completed';
+    progress?: string;
+  };
+}
+
+export interface ArtifactSaveRequest {
+  projectName: string;
+  filename: string;
+  content: string | ArrayBuffer | Uint8Array;
+  mimeType?: string;
+}
+
+export interface WorkspaceSearchRequest {
+  query: string;
+}
+
+export interface WorkspaceSearchResponse {
+  results: Array<{
+    project: string;
+    file: string;
+    matches: string[];
+  }>;
+}
+
+// =============================================================
+// Error Types
+// =============================================================
+
+export interface APIError {
+  error: string;
+  code?: string;
+  details?: Record<string, any>;
+}
+
+export class WorkspaceError extends Error {
+  constructor(message: string, public code?: string) {
+    super(message);
+    this.name = 'WorkspaceError';
+  }
+}
+
+export class ToolExecutionError extends Error {
+  constructor(message: string, public toolName: string) {
+    super(message);
+    this.name = 'ToolExecutionError';
+  }
+}
+
+// =============================================================
+// Configuration Types
+// =============================================================
+
+export interface OrionConfig {
+  geminiApiKey: string;
+  b2KeyId?: string;
+  b2KeySecret?: string;
+  jwtSecret?: string;
+  adminEmail?: string;
+  adminPasswordHash?: string;
+  maxMessageHistory?: number;
+  maxArtifacts?: number;
+  enableMemory?: boolean;
+  enableWorkspace?: boolean;
+}
+
+export interface SystemMetrics {
+  uptime: number;
+  totalRequests: number;
+  activeConnections: number;
+  storageUsed: number;
+  cacheHitRate: number;
 }
