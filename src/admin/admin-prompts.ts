@@ -314,6 +314,142 @@ ${userMessage}
 }
 
 // =============================================================
+// ✅ NEW: Worker System Instruction Builder
+// =============================================================
+
+export function buildWorkerSystemInstruction(
+  workerType: string,
+  config: {
+    name: string;
+    description: string;
+    capabilities: string[];
+    outputFormat?: string;
+  }
+): string {
+  return `<worker_instruction>
+<role>
+You are a specialized **${config.name}** worker in the Orion Multi-Agent System.
+
+Your mission: ${config.description}
+
+You are focused, efficient, and deliver high-quality results in your domain of expertise.
+</role>
+
+<capabilities>
+${config.capabilities.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+</capabilities>
+
+<execution_protocol>
+1. **Understand the Task**: Carefully analyze the objective, context, and instructions provided.
+
+2. **Execute with Excellence**: Use your specialized capabilities to complete the task.
+   - Use Google Search for current information when needed
+   - Use Code Execution for data analysis and computations
+   - Stay focused on the objective
+
+3. **Deliver Structured Output**: 
+   - Format: ${config.outputFormat || 'markdown'}
+   - Be thorough but concise
+   - Include sources and citations where applicable
+   - Ensure deliverable is ready for immediate use
+
+4. **Quality Assurance**:
+   - Self-review your work against quality criteria
+   - Verify all claims and calculations
+   - Ensure completeness before submitting
+</execution_protocol>
+
+<output_format>
+When you have completed the task, present your deliverable as:
+
+OUTPUT:
+[Your complete deliverable here]
+
+SUMMARY:
+[Brief 1-2 sentence summary of what was accomplished]
+</output_format>
+
+<important_notes>
+- Focus ONLY on your assigned task
+- Do NOT delegate to other workers
+- Do NOT engage in casual conversation
+- Deliver results efficiently within 5-8 turns maximum
+- Use native tools (Search, Code) automatically as needed
+</important_notes>
+</worker_instruction>`;
+}
+
+// =============================================================
+// ✅ NEW: Worker Task Prompt Builder
+// =============================================================
+
+export function buildWorkerTaskPrompt(task: {
+  objective: string;
+  context?: string;
+  instructions?: string;
+  constraints?: string[];
+  format?: string;
+  qualityCriteria?: string[];
+}): string {
+  const parts: string[] = [];
+
+  parts.push(`<task_assignment>
+<objective>
+${task.objective}
+</objective>`);
+
+  if (task.context) {
+    parts.push(`
+<context>
+${task.context}
+</context>`);
+  }
+
+  if (task.instructions) {
+    parts.push(`
+<instructions>
+${task.instructions}
+</instructions>`);
+  }
+
+  if (task.constraints && task.constraints.length > 0) {
+    parts.push(`
+<constraints>
+${task.constraints.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+</constraints>`);
+  }
+
+  if (task.format) {
+    parts.push(`
+<output_format>
+${task.format}
+</output_format>`);
+  }
+
+  if (task.qualityCriteria && task.qualityCriteria.length > 0) {
+    parts.push(`
+<quality_criteria>
+${task.qualityCriteria.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+</quality_criteria>`);
+  }
+
+  parts.push(`
+</task_assignment>
+
+<execution_instructions>
+1. Analyze the objective and context carefully
+2. Execute the task using your specialized capabilities
+3. Use native tools (Search, Code) as needed
+4. Format output according to specifications
+5. Deliver complete, polished result
+
+Begin working on the task now. When complete, present your output using the OUTPUT/SUMMARY format.
+</execution_instructions>`);
+
+  return parts.join('');
+}
+
+// =============================================================
 // Few-Shot Examples with Unified Protocol
 // =============================================================
 
@@ -412,5 +548,7 @@ ${basePrompt}`;
 export default {
   buildAdminSystemInstruction,
   buildAdminUserPrompt,
+  buildWorkerSystemInstruction,
+  buildWorkerTaskPrompt,
   buildAdminWithExamples,
 };
