@@ -35,3 +35,12 @@ database_id = "7d31bd26-9b8d-48ef-903b-b0000af23af2"
 [[vectorize]]
 binding = "VECTORIZE" # available in your Worker on env.VECTORIZE
 index_name = "memory-index"
+
+
+# -------------------------------------------------
+# Environment Variables
+# -------------------------------------------------
+[vars]
+GEMINI_API_KEY = "AIzaSyDxD7WiixJUVw6h0HWqW6lS8pHpVihnNTM"
+B2_KEY_ID = "0054fa48bcd04c50000000001"
+B2_KEY_SECRET = "K005F4qiG/n64dIlUlsz8Ot5Ruyn1eM"
