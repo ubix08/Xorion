@@ -2,20 +2,12 @@
 import { AwsClient } from 'aws4fetch';
 
 /**
- * B2Workspace - Dedicated Backblaze B2 workspace for the Orion agent
+ * B2Workspace - Single dedicated Backblaze B2 workspace for your agent (one user = one workspace)
  * 
- * Features:
- * - Full file system emulation (directories are virtual via prefixes + optional empty placeholder objects ending in /)
- * - All operations are async and throw descriptive errors on failure
- * - Per-session isolation by default (base path = orion-workspace/{sessionId}/)
- * - Works perfectly on Cloudflare Workers free tier (aws4fetch is tiny, no heavy deps)
- * - Text-first but supports binary via Uint8Array/Blob if needed
- * 
- * Required environment variables (add to your wrangler.toml or dashboard):
- *   B2_KEY_ID            - Application Key ID
- *   B2_APPLICATION_KEY   - Application Key (secret)
- *   B2_S3_ENDPOINT       - e.g. https://s3.us-west-000.backblazeb2.com
- *   B2_BUCKET            - Your bucket name
+ * → No session isolation anymore
+ * → All files/dirs live under one prefix (default: orion-workspace/)
+ * → You can change the prefix to '' (empty string) in your env to use the bucket root
+ * → Perfect for personal agent - everything is shared forever
  */
 
 export class B2Workspace {
@@ -24,22 +16,26 @@ export class B2Workspace {
   private bucket: string;
   private basePath: string;
 
-  constructor(env: Env, sessionId?: string) {
+  constructor(env: Env) {
     this.s3 = new AwsClient({
       accessKeyId: env.B2_KEY_ID as string,
       secretAccessKey: env.B2_APPLICATION_KEY as string,
     });
 
-    this.endpoint = (env.B2_S3_ENDPOINT as string).replace(/\/$/, ''); // ensure no trailing slash
+    this.endpoint = (env.B2_S3_ENDPOINT as string).replace(/\/$/, '');
     this.bucket = env.B2_BUCKET as string;
-    this.basePath = sessionId 
-      ? `orion-workspace/${sessionId}/` 
-      : 'orion-workspace/shared/';
+
+    // Change this if you want a different root folder
+    // Set B2_BASE_PATH='' in your env to use the bucket root directly
+    const customPath = env.B2_BASE_PATH as string | undefined;
+    this.basePath = customPath !== undefined 
+      ? (customPath.trim() === '' ? '' : customPath.replace(/\/+$/, '/') + '/')
+      : 'orion-workspace/';
   }
 
   private getKey(path: string): string {
     const normalized = path.replace(/^\/+/, '').replace(/\/+$/, '');
-    return normalized ? `${this.basePath}${normalized}` : this.basePath.slice(0, -1);
+    return normalized ? `${this.basePath}${normalized}` : this.basePath.replace(/\/$/, '');
   }
 
   private getKeyWithTrailingSlash(path: string): string {
@@ -47,8 +43,8 @@ export class B2Workspace {
     return key.endsWith('/') ? key : `${key}/`;
   }
 
-  /** Create directory (uploads 0-byte placeholder object ending in / so empty dirs are visible) */
   async mkdir(path: string): Promise<void> {
+    if (!path.trim()) throw new Error('Path cannot be empty');
     const key = this.getKeyWithTrailingSlash(path);
     const url = `${this.endpoint}/${this.bucket}/${key}`;
 
@@ -58,15 +54,12 @@ export class B2Workspace {
       headers: { 'Content-Length': '0' },
     });
 
-    if (!resp.ok) {
-      throw new Error(`mkdir failed (${resp.status}): ${await resp.text()}`);
-    }
+    if (!resp.ok) throw new Error(`mkdir failed (${resp.status}): ${await resp.text()}`);
   }
 
-  /** List directory contents */
   async ls(path: string = ''): Promise<{
     directories: string[];
-    files: { name: string; size: number; modified: Date }[];
+    files: { name: string; size: number; modified: Date }[]
   }> {
     const prefix = this.getKeyWithTrailingSlash(path);
     const encodedPrefix = encodeURIComponent(prefix);
@@ -94,32 +87,30 @@ export class B2Workspace {
       const fullKey = keyNode?.textContent || '';
       const name = fullKey.slice(prefix.length);
 
-      // Skip placeholder objects (size 0 and ends with / or empty name)
-      if (name && !fullKey.endsWith('/') && (sizeNode?.textContent || '0') !== '0') {
-        files.push({
-          name,
-          size: Number(sizeNode?.textContent || 0),
-          modified: new Date(dateNode?.textContent || 0),
-        });
-      }
+      // Skip directory placeholders and empty names
+      if (!name || name.endsWith('/')) return;
+
+      files.push({
+        name,
+        size: Number(sizeNode?.textContent || 0),
+        modified: new Date(dateNode?.textContent || 0),
+      });
     });
 
     return { directories, files };
   }
 
-  /** Read entire file as text (UTF-8) */
   async read(path: string): Promise<string> {
     const key = this.getKey(path);
     const url = `${this.endpoint}/${this.bucket}/${key}`;
-
     const resp = await this.s3.fetch(url);
+
     if (resp.status === 404) throw new Error(`File not found: ${path}`);
     if (!resp.ok) throw new Error(`read failed (${resp.status}): ${await resp.text()}`);
 
     return await resp.text();
   }
 
-  /** Write/overwrite file */
   async write(path: string, content: string | Uint8Array, mimeType = 'text/plain;charset=utf-8'): Promise<void> {
     const key = this.getKey(path);
     const url = `${this.endpoint}/${this.bucket}/${key}`;
@@ -130,12 +121,9 @@ export class B2Workspace {
       headers: { 'Content-Type': mimeType },
     });
 
-    if (!resp.ok) {
-      throw new Error(`write failed (${resp.status}): ${await resp.text()}`);
-    }
+    if (!resp.ok) throw new Error(`write failed (${resp.status}): ${await resp.text()}`);
   }
 
-  /** Append to file (read → append → write) */
   async append(path: string, content: string): Promise<void> {
     let current = '';
     try {
@@ -146,15 +134,14 @@ export class B2Workspace {
     await this.write(path, current + content);
   }
 
-  /** Update = overwrite (alias for write) */
   update = this.write;
 
-  /** Delete file or directory (recursive for directories) */
   async rm(path: string): Promise<void> {
+    if (!path.trim()) throw new Error('Cannot delete the workspace root');
+
     const prefix = this.getKeyWithTrailingSlash(path);
     const encodedPrefix = encodeURIComponent(prefix);
 
-    // List everything with this prefix (no delimiter to get all keys)
     let marker: string | undefined;
     do {
       let listUrl = `${this.endpoint}/${this.bucket}?prefix=${encodedPrefix}&list-type=2`;
@@ -172,27 +159,32 @@ export class B2Workspace {
 
       marker = doc.querySelector('NextMarker')?.textContent || undefined;
 
-      // Delete all found objects
       await Promise.all(
-        keys.map(key =>
-          this.s3.fetch(`${this.endpoint}/${this.bucket}/${key}`, { method: 'DELETE' })
-        )
+        keys.map(key => this.s3.fetch(`${this.endpoint}/${this.bucket}/${key}`, { method: 'DELETE' }))
       );
     } while (marker);
   }
 
-  /** Check if path exists (file or directory) */
-  async exists(path: string): Promise<boolean> {
-    try {
-      const key = this.getKey(path);
-      const resp = await this.s3.fetch(`${this.endpoint}/${this.bucket}/${key}`, { method: 'HEAD' });
-      if (resp.ok) return true;
+  async exists(path: string): Promise<'file' | 'directory' | false> {
+    // Check as file
+    const fileKey = this.getKey(path);
+    let resp = await this.s3.fetch(`${this.endpoint}/${this.bucket}/${fileKey}`, { method: 'HEAD' });
+    if (resp.ok) return 'file';
 
-      // Might be a virtual directory - check if it has contents
-      const { files, directories } = await this.ls(path);
-      return files.length > 0 || directories.length > 0;
+    // Check as directory (placeholder)
+    const dirKey = this.getKeyWithTrailingSlash(path);
+    resp = await this.s3.fetch(`${this.endpoint}/${this.bucket}/${dirKey}`, { method: 'HEAD' });
+    if (resp.ok) return 'directory';
+
+    // Check if directory has contents (no placeholder needed)
+    try {
+      const listing = await this.ls(path);
+      if (listing.files.length > 0 || listing.directories.length > 0) return 'directory';
     } catch {
-      return false;
+      // ignore
     }
+
+    return false;
   }
 }
+export default B2Workspace;
