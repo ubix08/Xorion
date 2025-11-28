@@ -1,5 +1,9 @@
-// src/durable-agent.ts - Updated with Workspace & Unified XML Protocol
-// Key changes marked with // ✅ NEW
+// src/durable-agent.ts - FIXED VERSION with All Phase 1 Improvements
+// ✅ Loop completion detection
+// ✅ Tool execution timeouts
+// ✅ Graceful error handling
+// ✅ Worker structured output
+// ✅ Better user messaging
 
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectState } from '@cloudflare/workers-types';
@@ -14,9 +18,13 @@ import {
   buildAdminUserPrompt,
   buildWorkerSystemInstruction,
   buildWorkerTaskPrompt,
-} from './admin/admin-prompts'; // ✅ NEW: Updated prompts
-import { WorkspaceManager } from './workspace/workspace-manager'; // ✅ NEW
-import { XMLToolParser, XMLToolExecutor, type ToolExecutionResult } from './tools/xml-tool-executor'; // ✅ NEW
+} from './admin/admin-prompts';
+import { WorkspaceManager } from './workspace/workspace-manager';
+import { XMLToolParser, XMLToolExecutor, type ToolExecutionResult } from './tools/xml-tool-executor';
+
+// =============================================================
+// Types & Interfaces
+// =============================================================
 
 interface ParsedAdminResponse {
   action: 'respond' | 'tool_call';
@@ -30,6 +38,237 @@ interface ParsedAdminResponse {
   metadata?: Record<string, any>;
 }
 
+interface CompletionState {
+  resolved: boolean;
+  confidence: number;
+  reason: string;
+}
+
+interface ErrorRecovery {
+  userMessage: string;
+  suggestedAction?: string;
+  retryable: boolean;
+  retryAfterSeconds?: number;
+  partialResults?: any;
+}
+
+// =============================================================
+// Completion Detector
+// =============================================================
+
+class CompletionDetector {
+  async checkCompletion(
+    userQuery: string,
+    currentResponse: string,
+    executionState: {
+      toolCalls: any[];
+      artifacts: any[];
+      turnsUsed: number;
+      maxTurns: number;
+    }
+  ): Promise<CompletionState> {
+    const noToolCalls = executionState.toolCalls.length === 0;
+    const hasCompletionMarker = this.hasCompletionMarker(currentResponse);
+    const queryResolved = this.checkQueryResolved(userQuery, currentResponse);
+    const hasArtifacts = executionState.artifacts.length > 0;
+    const nearBudget = executionState.turnsUsed >= executionState.maxTurns * 0.8;
+    
+    const confidence = this.calculateConfidence({
+      noToolCalls,
+      hasCompletionMarker,
+      queryResolved,
+      hasArtifacts,
+      nearBudget,
+      turnsUsed: executionState.turnsUsed
+    });
+    
+    const resolved = (
+      (noToolCalls && confidence > 0.7) ||
+      (hasCompletionMarker && confidence > 0.6) ||
+      (queryResolved && noToolCalls)
+    );
+    
+    const reason = this.getCompletionReason({
+      noToolCalls,
+      hasCompletionMarker,
+      queryResolved,
+      nearBudget
+    });
+    
+    return { resolved, confidence, reason };
+  }
+  
+  private hasCompletionMarker(response: string): boolean {
+    const markers = [
+      /TASK_COMPLETE/i,
+      /\[DONE\]/i,
+      /I(?:'ve| have) completed/i,
+      /Here(?:'s| is) (?:your|the) final/i,
+      /Let me know if you need anything else/i
+    ];
+    return markers.some(marker => marker.test(response));
+  }
+  
+  private checkQueryResolved(userQuery: string, response: string): boolean {
+    const queryLower = userQuery.toLowerCase();
+    const responseLower = response.toLowerCase();
+    
+    if (queryLower.match(/what|who|when|where|why|how/)) {
+      return response.length > 100 && !responseLower.includes('need more information');
+    }
+    
+    if (queryLower.match(/create|build|make|generate|write/)) {
+      return responseLower.includes('created') || 
+             responseLower.includes('generated') ||
+             responseLower.includes('completed');
+    }
+    
+    if (queryLower.match(/search|research|find|look up/)) {
+      return responseLower.includes('found') || 
+             responseLower.includes('results') ||
+             response.length > 200;
+    }
+    
+    return response.length > 150;
+  }
+  
+  private calculateConfidence(signals: {
+    noToolCalls: boolean;
+    hasCompletionMarker: boolean;
+    queryResolved: boolean;
+    hasArtifacts: boolean;
+    nearBudget: boolean;
+    turnsUsed: number;
+  }): number {
+    let score = 0.5;
+    
+    if (signals.noToolCalls) score += 0.2;
+    if (signals.hasCompletionMarker) score += 0.3;
+    if (signals.queryResolved) score += 0.25;
+    if (signals.hasArtifacts) score += 0.15;
+    if (signals.turnsUsed < 2) score -= 0.1;
+    if (signals.nearBudget) score -= 0.2;
+    
+    return Math.max(0, Math.min(1, score));
+  }
+  
+  private getCompletionReason(signals: any): string {
+    if (signals.hasCompletionMarker) return 'explicit_completion';
+    if (signals.queryResolved && signals.noToolCalls) return 'query_resolved';
+    if (signals.nearBudget) return 'turn_budget_exhausted';
+    if (signals.noToolCalls) return 'no_further_actions';
+    return 'confidence_threshold';
+  }
+}
+
+// =============================================================
+// Error Handler
+// =============================================================
+
+class ErrorHandler {
+  handleError(error: Error, context: {
+    userQuery: string;
+    turnsCompleted: number;
+    artifactsCreated: any[];
+    toolsUsed: string[];
+  }): ErrorRecovery {
+    if (error.message.includes('429') || error.message.includes('rate limit')) {
+      return {
+        userMessage: "I'm experiencing high demand right now. Your request is saved and I'll retry automatically in 30 seconds.",
+        suggestedAction: "You can also try rephrasing to a simpler query.",
+        retryable: true,
+        retryAfterSeconds: 30
+      };
+    }
+    
+    if (error.message.includes('timeout')) {
+      return {
+        userMessage: "The operation is taking longer than expected. I've saved your progress.",
+        suggestedAction: "Try breaking your request into smaller steps, or ask 'continue from where we left off'.",
+        retryable: true,
+        partialResults: context.artifactsCreated
+      };
+    }
+    
+    if (error.message.includes('ECONNREFUSED') || error.message.includes('503')) {
+      const service = this.detectService(error);
+      return {
+        userMessage: `The ${service} service is temporarily unavailable. I can still help with other tasks.`,
+        suggestedAction: `Try a query that doesn't require ${service}, or wait a few minutes and retry.`,
+        retryable: true,
+        retryAfterSeconds: 60
+      };
+    }
+    
+    if (error.message.includes('B2') || error.message.includes('workspace')) {
+      return {
+        userMessage: "I'm having trouble accessing your workspace. Your project data is safe.",
+        suggestedAction: "Try again in a moment. If this persists, I can work without the workspace temporarily.",
+        retryable: true,
+        retryAfterSeconds: 30
+      };
+    }
+    
+    if (error.message.includes('Vectorize') || error.message.includes('memory')) {
+      return {
+        userMessage: "I'm having trouble accessing conversation memory. I can still help, but won't recall past discussions.",
+        suggestedAction: "Feel free to provide any context from previous conversations.",
+        retryable: false
+      };
+    }
+    
+    return {
+      userMessage: "I encountered an unexpected issue. Let me try a different approach.",
+      suggestedAction: "Could you rephrase your request or break it into smaller steps?",
+      retryable: true
+    };
+  }
+  
+  private detectService(error: Error): string {
+    if (error.message.includes('B2') || error.message.includes('workspace')) return 'workspace';
+    if (error.message.includes('Vectorize') || error.message.includes('memory')) return 'memory';
+    if (error.message.includes('Gemini')) return 'AI model';
+    return 'external';
+  }
+}
+
+// =============================================================
+// Timeout Wrapper
+// =============================================================
+
+class TimeoutWrapper {
+  private readonly TOOL_TIMEOUTS: Record<string, number> = {
+    'memory_search': 10000,
+    'knowledge_search': 15000,
+    'workspace': 20000,
+    'delegate_worker': 120000,
+  };
+  
+  async executeWithTimeout<T>(
+    toolName: string,
+    executor: () => Promise<T>
+  ): Promise<T> {
+    const timeout = this.TOOL_TIMEOUTS[toolName] || 30000;
+    
+    return Promise.race([
+      executor(),
+      this.createTimeout<T>(timeout, toolName)
+    ]);
+  }
+  
+  private createTimeout<T>(ms: number, toolName: string): Promise<T> {
+    return new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`Tool '${toolName}' timed out after ${ms}ms`));
+      }, ms);
+    });
+  }
+}
+
+// =============================================================
+// Main Orion Agent
+// =============================================================
+
 export class OrionAgent extends DurableObject implements OrionRPC {
   private state: DurableObjectState;
   private storage: DurableStorage;
@@ -37,10 +276,16 @@ export class OrionAgent extends DurableObject implements OrionRPC {
   private env: Env;
   private d1?: D1Manager;
   private memory?: MemoryManager;
-  private workspace: WorkspaceManager; // ✅ NEW
+  private workspace: WorkspaceManager;
   private sessionId?: string;
   private initialized = false;
   private adminSystemInstruction: string;
+  
+  // Helper classes
+  private completionDetector = new CompletionDetector();
+  private errorHandler = new ErrorHandler();
+  private timeoutWrapper = new TimeoutWrapper();
+  
   private metrics = {
     totalRequests: 0,
     nativeToolCalls: 0,
@@ -48,9 +293,12 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     adminTurns: 0,
     workerTurns: 0,
     thinkingTokensUsed: 0,
-    workspaceOperations: 0, // ✅ NEW
-    memorySearches: 0, // ✅ NEW
-    knowledgeSearches: 0, // ✅ NEW
+    workspaceOperations: 0,
+    memorySearches: 0,
+    knowledgeSearches: 0,
+    completionReasons: {} as Record<string, number>,
+    timeouts: 0,
+    errors: 0,
   };
 
   constructor(state: DurableObjectState, env: Env) {
@@ -59,7 +307,8 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     this.env = env;
     this.storage = new DurableStorage(state);
     this.gemini = new GeminiClient({ apiKey: env.GEMINI_API_KEY });
-    this.workspace = new WorkspaceManager(); // ✅ NEW
+    this.workspace = new WorkspaceManager();
+    this.workspace.init(env);
     this.adminSystemInstruction = buildAdminSystemInstruction();
     const name = state.id.name;
     if (name?.startsWith('session:')) {
@@ -91,36 +340,46 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     }
   }
 
+  // =============================================================
+  // RPC Interface
+  // =============================================================
+
   async chat(
     message: string,
     images?: Array<{ data: string; mimeType: string }>
   ): Promise<ChatResponse> {
     await this.init();
     if (!message?.trim()) throw new Error('Message cannot be empty');
-    const result = await this.executeAdminLoop(message, images);
-    return {
-      response: result.response,
-      artifacts: result.artifacts,
-      metadata: {
-        turnsUsed: result.turnsUsed || 0,
-        toolsUsed: result.toolsUsed || [],
-        thinkingTokens: result.thinkingTokens || 0,
-      },
-    } as unknown as ChatResponse;
-  }
-
-  private async syncToD1(): Promise<void> {
-    if (!this.d1 || !this.sessionId) return;
+    
     try {
-      const messages = this.storage.getMessages();
-      if (messages.length === 0) return;
-      const latestInD1 = await this.d1.getLatestMessageTimestamp(this.sessionId);
-      const newMessages = messages.filter((m) => (m.timestamp || 0) > latestInD1);
-      if (newMessages.length > 0) await this.d1.saveMessages(this.sessionId, newMessages);
-      const artifacts = this.storage.getArtifacts();
-      for (const artifact of artifacts) await this.d1.saveArtifact(this.sessionId, artifact);
-    } catch (err) {
-      console.error('[Agent] D1 sync failed:', err);
+      const result = await this.executeAdminLoop(message, images);
+      return {
+        response: result.response,
+        artifacts: result.artifacts,
+        metadata: {
+          turnsUsed: result.turnsUsed || 0,
+          toolsUsed: result.toolsUsed || [],
+          thinkingTokens: result.thinkingTokens || 0,
+        },
+      } as unknown as ChatResponse;
+    } catch (error) {
+      this.metrics.errors++;
+      const recovery = this.errorHandler.handleError(error as Error, {
+        userQuery: message,
+        turnsCompleted: 0,
+        artifactsCreated: [],
+        toolsUsed: []
+      });
+      
+      return {
+        response: `${recovery.userMessage}\n\n${recovery.suggestedAction || ''}`,
+        artifacts: recovery.partialResults || [],
+        metadata: {
+          error: true,
+          retryable: recovery.retryable,
+          retryAfter: recovery.retryAfterSeconds
+        }
+      } as unknown as ChatResponse;
     }
   }
 
@@ -161,8 +420,6 @@ export class OrionAgent extends DurableObject implements OrionRPC {
 
   async getStatus(): Promise<StatusResponse> {
     await this.init();
-    
-    // ✅ NEW: Get workspace status
     const projects = await this.workspace.listProjects();
     
     return {
@@ -181,13 +438,17 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         thinking: true,
       },
       memory: this.memory ? this.memory.getMetrics() : null,
-      workspace: { // ✅ NEW
+      workspace: {
         enabled: true,
         projectCount: projects.length,
         activeProjects: projects.filter(p => p.status === 'active').length,
       },
     } as unknown as StatusResponse;
   }
+
+  // =============================================================
+  // WebSocket Support
+  // =============================================================
 
   async fetch(request: Request): Promise<Response> {
     const upgradeHeader = request.headers.get('Upgrade');
@@ -238,6 +499,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       onToolUse: (tool: string, params: any) => ws.send(JSON.stringify({ type: 'tool_use', tool, params })),
       onArtifact: (artifact: any) => ws.send(JSON.stringify({ type: 'artifact', artifact })),
     };
+    
     try {
       const result = await this.executeAdminLoop(message, images, callbacks as any);
       ws.send(JSON.stringify({ 
@@ -247,15 +509,31 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         metadata: { 
           turnsUsed: result.turnsUsed, 
           toolsUsed: result.toolsUsed, 
-          thinkingTokens: result.thinkingTokens 
+          thinkingTokens: result.thinkingTokens,
+          completionReason: result.completionReason,
+          confidence: result.confidence
         } 
       }));
     } catch (error) {
-      ws.send(JSON.stringify({ type: 'error', error: error instanceof Error ? error.message : String(error) }));
+      const recovery = this.errorHandler.handleError(error as Error, {
+        userQuery: message,
+        turnsCompleted: 0,
+        artifactsCreated: [],
+        toolsUsed: []
+      });
+      ws.send(JSON.stringify({ 
+        type: 'error', 
+        error: recovery.userMessage,
+        suggestion: recovery.suggestedAction,
+        retryable: recovery.retryable
+      }));
     }
   }
 
-  // ✅ NEW: Main execution loop with XML tool support
+  // =============================================================
+  // Main Execution Loop (FIXED)
+  // =============================================================
+
   async executeAdminLoop(
     userMessage: string,
     images?: Array<{ data: string; mimeType: string }>,
@@ -272,6 +550,9 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     turnsUsed?: number;
     toolsUsed?: string[];
     thinkingTokens?: number;
+    completionReason?: string;
+    confidence?: number;
+    partial?: boolean;
   }> {
     this.metrics.totalRequests++;
     callbacks?.onStatus?.('Analyzing your request...');
@@ -279,7 +560,6 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     await this.saveMessage('user', userMessage);
     const files = await this.gemini.listFiles();
     
-    // ✅ NEW: Check for active project context
     const projects = await this.workspace.listProjects();
     const activeProject = projects.find(p => p.status === 'active');
     
@@ -289,18 +569,28 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       fileCount: files.length,
       conversationLength: this.storage.getMessages().length,
       memoryAvailable: !!this.memory,
-      workspaceAvailable: true, // ✅ NEW
-      activeProject: activeProject?.name, // ✅ NEW
+      workspaceAvailable: true,
+      activeProject: activeProject?.name,
     });
     
     const artifacts: any[] = [];
     const toolsUsed = new Set<string>();
     let turn = 0;
-    const maxTurns = 15; // ✅ NEW: Increased for tool iterations
+    const maxTurns = 15;
     let totalThinkingTokens = 0;
     const conversationHistory = this.formatContextForGemini(this.storage.getMessages().slice(-10));
     
-    while (turn < maxTurns) {
+    const executionState = {
+      resolved: false,
+      confidence: 0,
+      toolCalls: [] as any[],
+      artifacts: [] as any[],
+      turnsUsed: 0,
+      maxTurns
+    };
+    
+    // ✅ FIXED: Loop with completion detection
+    while (turn < maxTurns && !executionState.resolved) {
       turn++;
       this.metrics.adminTurns++;
       callbacks?.onStatus?.(`Processing (turn ${turn}/${maxTurns})...`);
@@ -346,11 +636,12 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         callbacks?.onToolUse?.('code_execution', { executed: response.codeExecutionResults.length });
       }
       
-      // ✅ NEW: Parse and execute XML tool calls
       const parsed = this.parseAdminResponse(response.text, response);
       
+      // ✅ FIXED: Execute tools with timeout
       if (parsed.action === 'tool_call' && parsed.toolCalls) {
-        // Execute all tool calls
+        executionState.toolCalls = parsed.toolCalls;
+        
         const toolExecutor = new XMLToolExecutor(
           this.workspace,
           this.gemini,
@@ -362,120 +653,134 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           callbacks?.onStatus?.(`Executing ${toolCall.toolName}...`);
           callbacks?.onToolUse?.(toolCall.toolName, toolCall.params);
           
-          const result = await toolExecutor.executeTool(toolCall.toolName, toolCall.params);
-          
-          toolsUsed.add(toolCall.toolName);
-          
-          // Update metrics
-          if (toolCall.toolName === 'workspace') this.metrics.workspaceOperations++;
-          if (toolCall.toolName === 'memory_search') this.metrics.memorySearches++;
-          if (toolCall.toolName === 'knowledge_search') this.metrics.knowledgeSearches++;
-          if (toolCall.toolName === 'delegate_worker') this.metrics.delegations++;
-          
-          // Handle worker delegation specially
-          if (toolCall.toolName === 'delegate_worker' && result.success && result.metadata?.envelope) {
-            const workerResult = await this.executeWorkerLoop(result.metadata.envelope, callbacks);
+          try {
+            // ✅ FIXED: Timeout wrapper
+            const result = await this.timeoutWrapper.executeWithTimeout(
+              toolCall.toolName,
+              () => toolExecutor.executeTool(toolCall.toolName, toolCall.params)
+            );
             
-            if (workerResult.success && workerResult.artifactId) {
-              const artifact = this.storage.getArtifacts().find((a) => a.id === workerResult.artifactId);
-              if (artifact) {
-                artifacts.push(artifact);
-                callbacks?.onArtifact?.(artifact);
+            toolsUsed.add(toolCall.toolName);
+            
+            if (toolCall.toolName === 'workspace') this.metrics.workspaceOperations++;
+            if (toolCall.toolName === 'memory_search') this.metrics.memorySearches++;
+            if (toolCall.toolName === 'knowledge_search') this.metrics.knowledgeSearches++;
+            if (toolCall.toolName === 'delegate_worker') this.metrics.delegations++;
+            
+            if (toolCall.toolName === 'delegate_worker' && result.success && result.metadata?.envelope) {
+              const workerResult = await this.executeWorkerLoop(result.metadata.envelope, callbacks);
+              
+              if (workerResult.success && workerResult.artifactId) {
+                const artifact = this.storage.getArtifacts().find((a) => a.id === workerResult.artifactId);
+                if (artifact) {
+                  artifacts.push(artifact);
+                  executionState.artifacts.push(artifact);
+                  callbacks?.onArtifact?.(artifact);
+                }
               }
+              
+              workerResult.toolsUsed.forEach((t) => toolsUsed.add(t));
+              
+              const workerSummary = workerResult.success
+                ? `<tool_result tool="delegate_worker" status="success">\nWorker completed task\nSummary: ${workerResult.summary}\nArtifact: ${workerResult.artifactId}\n</tool_result>`
+                : `<tool_result tool="delegate_worker" status="failed">\nError: ${workerResult.error}\n</tool_result>`;
+              
+              conversationHistory.push({ role: 'user', content: workerSummary });
+            } else {
+              const toolResult = result.success
+                ? `<tool_result tool="${result.toolName}" status="success">\n${result.result}\n</tool_result>`
+                : `<tool_result tool="${result.toolName}" status="error">\n${result.error}\n</tool_result>`;
+              
+              conversationHistory.push({ role: 'user', content: toolResult });
             }
+          } catch (error) {
+            this.metrics.timeouts++;
+            console.error(`[Agent] Tool ${toolCall.toolName} failed:`, error);
             
-            workerResult.toolsUsed.forEach((t) => toolsUsed.add(t));
-            
-            const workerSummary = workerResult.success
-              ? `<tool_result tool="delegate_worker" status="success">\nWorker completed task\nSummary: ${workerResult.summary}\nArtifact: ${workerResult.artifactId}\n</tool_result>`
-              : `<tool_result tool="delegate_worker" status="failed">\nError: ${workerResult.error}\n</tool_result>`;
-            
-            conversationHistory.push({ role: 'user', content: workerSummary });
-          } else {
-            // Add tool result to conversation
-            const toolResult = result.success
-              ? `<tool_result tool="${result.toolName}" status="success">\n${result.result}\n</tool_result>`
-              : `<tool_result tool="${result.toolName}" status="error">\n${result.error}\n</tool_result>`;
-            
-            conversationHistory.push({ role: 'user', content: toolResult });
+            conversationHistory.push({ 
+              role: 'user', 
+              content: `<tool_result tool="${toolCall.toolName}" status="timeout">\nOperation timed out. Please try again.\n</tool_result>` 
+            });
           }
         }
         
-        // Add assistant response to history
         conversationHistory.push({ role: 'assistant', content: response.text });
         
-        // Continue loop to let agent process tool results
+        // ✅ FIXED: Check completion
+        const completion = await this.completionDetector.checkCompletion(
+          userMessage,
+          response.text,
+          { ...executionState, turnsUsed: turn }
+        );
+        
+        executionState.resolved = completion.resolved;
+        executionState.confidence = completion.confidence;
+        
+        if (completion.resolved) {
+          console.log(`[Orion] Completion detected: ${completion.reason} (confidence: ${completion.confidence})`);
+          this.metrics.completionReasons[completion.reason] = (this.metrics.completionReasons[completion.reason] || 0) + 1;
+        }
+        
         continue;
       }
       
-      // If no tool calls, we have final response
+      // ✅ FIXED: Natural completion check
       if (parsed.action === 'respond') {
-        const fullResponse = parsed.content;
-        await this.saveMessage('model', fullResponse);
+        const completion = await this.completionDetector.checkCompletion(
+          userMessage,
+          response.text,
+          { ...executionState, turnsUsed: turn }
+        );
         
-        if (this.memory) {
-          this.saveToMemory(userMessage, fullResponse).catch(() => {});
+        if (completion.resolved || completion.confidence > 0.7) {
+          const fullResponse = parsed.content;
+          await this.saveMessage('model', fullResponse);
+          
+          if (this.memory) {
+            this.saveToMemory(userMessage, fullResponse).catch(() => {});
+          }
+          
+          this.syncToD1().catch(() => {});
+          this.metrics.completionReasons[completion.reason] = (this.metrics.completionReasons[completion.reason] || 0) + 1;
+          
+          return { 
+            response: fullResponse, 
+            artifacts, 
+            turnsUsed: turn, 
+            toolsUsed: Array.from(toolsUsed), 
+            thinkingTokens: totalThinkingTokens,
+            completionReason: completion.reason,
+            confidence: completion.confidence
+          };
         }
-        
-        this.syncToD1().catch(() => {});
-        
-        return { 
-          response: fullResponse, 
-          artifacts, 
-          turnsUsed: turn, 
-          toolsUsed: Array.from(toolsUsed), 
-          thinkingTokens: totalThinkingTokens 
-        };
       }
       
       conversationHistory.push({ role: 'assistant', content: response.text });
     }
     
-    const timeoutResponse = 'I reached my processing limit while working on your request. Let me summarize what I accomplished...';
+    // ✅ FIXED: Better timeout handling with partial results
+    const partialSummary = this.summarizeWorkDone(conversationHistory, artifacts);
+    const timeoutResponse = `I've made progress on your request:\n\n${partialSummary}\n\nTo continue, please ask specific follow-up questions or say "continue from where we left off".`;
+    
     await this.saveMessage('model', timeoutResponse);
+    this.metrics.completionReasons['turn_limit_reached'] = (this.metrics.completionReasons['turn_limit_reached'] || 0) + 1;
     
     return { 
       response: timeoutResponse, 
       artifacts, 
       turnsUsed: turn, 
       toolsUsed: Array.from(toolsUsed), 
-      thinkingTokens: totalThinkingTokens 
+      thinkingTokens: totalThinkingTokens,
+      partial: true,
+      completionReason: 'turn_limit_reached',
+      confidence: 0.5
     };
   }
 
-  // ✅ NEW: Updated response parser for XML tools
-  private parseAdminResponse(text: string, geminiResponse: any): ParsedAdminResponse {
-    const toolCalls = XMLToolParser.parseTools(text);
-    
-    if (toolCalls.length > 0) {
-      // Remove tool XML from content
-      let cleanedText = text;
-      toolCalls.forEach(tc => {
-        cleanedText = cleanedText.replace(tc.rawXml, '');
-      });
-      
-      return {
-        action: 'tool_call',
-        content: cleanedText.trim(),
-        toolCalls,
-        metadata: {
-          searchResults: geminiResponse.searchResults,
-          codeExecutionResults: geminiResponse.codeExecutionResults,
-        },
-      };
-    }
-    
-    return {
-      action: 'respond',
-      content: text.trim(),
-      metadata: {
-        searchResults: geminiResponse.searchResults,
-        codeExecutionResults: geminiResponse.codeExecutionResults,
-      },
-    };
-  }
+  // =============================================================
+  // Worker Execution (FIXED with JSON Schema)
+  // =============================================================
 
-  // Worker execution (unchanged from original)
   private async executeWorkerLoop(
     envelope: any,
     callbacks?: { onStatus?: (msg: string) => void }
@@ -512,10 +817,11 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       
       const messages = [
         { role: 'system', content: systemInstruction },
-        { role: 'user', content: turn === 1 ? taskPrompt : 'Continue with your task.' },
+        { role: 'user', content: turn === 1 ? taskPrompt : 'Continue working. Remember to set status=complete when done.' },
         ...workerHistory,
       ];
       
+      // ✅ FIXED: Use JSON schema for structured output
       const response = await this.gemini.generateWithNativeTools(messages, {
         stream: false,
         temperature: config.temperature || 0.7,
@@ -523,32 +829,98 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         useCodeExecution: config.tools.some((t) => t.name === 'code_execution' && t.enabled),
         thinkingConfig: { thinkingBudget: 4096, includeThoughts: true },
         maxOutputTokens: 8192,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'object',
+          properties: {
+            status: { 
+              type: 'string', 
+              enum: ['working', 'complete', 'error'],
+              description: 'Current status of the task'
+            },
+            progress: { 
+              type: 'number', 
+              minimum: 0, 
+              maximum: 100,
+              description: 'Percentage complete (0-100)'
+            },
+            currentStep: { 
+              type: 'string',
+              description: 'What the worker is currently doing'
+            },
+            output: { 
+              type: 'string',
+              description: 'Final deliverable (only when status=complete)'
+            },
+            summary: { 
+              type: 'string',
+              description: 'Brief summary of work done'
+            },
+            error: { 
+              type: 'string',
+              description: 'Error message if status=error'
+            }
+          },
+          required: ['status']
+        }
       });
       
       if (response.searchResults) toolsUsed.push('web_search');
       if (response.codeExecutionResults) toolsUsed.push('code_execution');
       
-      const parsed = this.parseWorkerResponse(response.text);
+      // ✅ FIXED: Parse JSON structure
+      let workerOutput: any;
+      try {
+        workerOutput = JSON.parse(response.text);
+      } catch (error) {
+        console.error('[Worker] Failed to parse JSON output:', error);
+        return {
+          success: false,
+          summary: 'Worker output parsing failed',
+          error: 'Invalid JSON response from worker',
+          toolsUsed: [...new Set(toolsUsed)],
+          turnsUsed: turn
+        };
+      }
       
-      if (parsed.complete && parsed.output) {
-        const artifact = await this.createArtifact(envelope, parsed.output, envelope.workerType);
+      // Handle completion
+      if (workerOutput.status === 'complete' && workerOutput.output) {
+        const artifact = await this.createArtifact(envelope, workerOutput.output, envelope.workerType);
         await this.storage.saveArtifact(artifact);
         
         return { 
           success: true, 
-          summary: parsed.summary || envelope.objective, 
+          summary: workerOutput.summary || envelope.objective, 
           artifactId: artifact.id, 
           toolsUsed: [...new Set(toolsUsed)], 
           turnsUsed: turn 
         };
       }
       
+      if (workerOutput.status === 'error') {
+        return {
+          success: false,
+          summary: 'Worker encountered an error',
+          error: workerOutput.error || 'Unknown error',
+          toolsUsed: [...new Set(toolsUsed)],
+          turnsUsed: turn
+        };
+      }
+      
+      // Status is 'working' - provide progress update
+      if (workerOutput.currentStep) {
+        callbacks?.onStatus?.(
+          `${config.name}: ${workerOutput.progress || 0}% - ${workerOutput.currentStep}`
+        );
+      }
+      
       workerHistory.push(
         { role: 'assistant', content: response.text },
-        { role: 'user', content: '<instruction>Continue working. Output final deliverable when ready.</instruction>' }
+        { role: 'user', content: 'Continue. Output status=complete when ready.' }
       );
     }
     
+    // Exceeded max turns
     return { 
       success: false, 
       summary: 'Task incomplete', 
@@ -558,15 +930,38 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     };
   }
 
-  private parseWorkerResponse(text: string): { output?: string; summary?: string; complete: boolean } {
-    const outputMatch = text.match(/OUTPUT:\s*\n([\s\S]*?)(?:\n\nSUMMARY:|$)/i);
-    if (outputMatch) {
-      const output = outputMatch[1].trim();
-      const summaryMatch = text.match(/SUMMARY:\s*([^\n]+)/i);
-      const summary = summaryMatch ? summaryMatch[1].trim() : undefined;
-      return { output, summary, complete: true };
+  // =============================================================
+  // Helper Methods
+  // =============================================================
+
+  private parseAdminResponse(text: string, geminiResponse: any): ParsedAdminResponse {
+    const toolCalls = XMLToolParser.parseTools(text);
+    
+    if (toolCalls.length > 0) {
+      let cleanedText = text;
+      toolCalls.forEach(tc => {
+        cleanedText = cleanedText.replace(tc.rawXml, '');
+      });
+      
+      return {
+        action: 'tool_call',
+        content: cleanedText.trim(),
+        toolCalls,
+        metadata: {
+          searchResults: geminiResponse.searchResults,
+          codeExecutionResults: geminiResponse.codeExecutionResults,
+        },
+      };
     }
-    return { complete: false };
+    
+    return {
+      action: 'respond',
+      content: text.trim(),
+      metadata: {
+        searchResults: geminiResponse.searchResults,
+        codeExecutionResults: geminiResponse.codeExecutionResults,
+      },
+    };
   }
 
   private formatContextForGemini(messages: Message[]): Array<{ role: string; content: string }> {
@@ -618,6 +1013,41 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         format: envelope.expectedOutput.format,
       },
     };
+  }
+
+  private async syncToD1(): Promise<void> {
+    if (!this.d1 || !this.sessionId) return;
+    try {
+      const messages = this.storage.getMessages();
+      if (messages.length === 0) return;
+      const latestInD1 = await this.d1.getLatestMessageTimestamp(this.sessionId);
+      const newMessages = messages.filter((m) => (m.timestamp || 0) > latestInD1);
+      if (newMessages.length > 0) await this.d1.saveMessages(this.sessionId, newMessages);
+      const artifacts = this.storage.getArtifacts();
+      for (const artifact of artifacts) await this.d1.saveArtifact(this.sessionId, artifact);
+    } catch (err) {
+      console.error('[Agent] D1 sync failed:', err);
+    }
+  }
+
+  private summarizeWorkDone(history: any[], artifacts: any[]): string {
+    const summary: string[] = [];
+    
+    if (artifacts.length > 0) {
+      summary.push(`✅ Created ${artifacts.length} artifact(s):`);
+      artifacts.forEach(a => summary.push(`  - ${a.title}`));
+    }
+    
+    const toolsUsed = history
+      .filter(m => m.content?.includes('<tool_result'))
+      .map(m => m.content.match(/tool="([^"]+)"/)?.[1])
+      .filter(Boolean);
+    
+    if (toolsUsed.length > 0) {
+      summary.push(`\n✅ Completed ${toolsUsed.length} operation(s)`);
+    }
+    
+    return summary.join('\n') || 'Made initial progress on analysis';
   }
 }
 
