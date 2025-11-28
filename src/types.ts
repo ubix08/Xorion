@@ -1,4 +1,4 @@
-// src/types.ts - Updated with Workspace and XML Tool Types
+// src/types.ts - Enhanced Type Definitions with State Management
 
 import type { DurableObjectNamespace, D1Database, VectorizeIndex } from '@cloudflare/workers-types';
 
@@ -14,9 +14,64 @@ export interface Env {
   JWT_SECRET?: string;
   ADMIN_GMAIL?: string;
   ADMIN_PASSWORD_HASH?: string;
-  // ✅ NEW: Workspace credentials
   B2_KEY_ID?: string;
   B2_KEY_SECRET?: string;
+}
+
+// =============================================================
+// Agent State Machine
+// =============================================================
+
+export enum AgentState {
+  INITIAL = 'initial',
+  PLANNING = 'planning',
+  EXECUTION = 'execution',
+  COMPLETION = 'completion',
+}
+
+export interface StateContext {
+  currentState: AgentState;
+  projectId?: string;
+  todoPath?: string;
+  userRequest: string;
+  observations: string[];
+  toolResults: ToolResult[];
+  checkpointWaiting: boolean;
+}
+
+// =============================================================
+// Todo Plan Structure
+// =============================================================
+
+export interface TodoTask {
+  id: number;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  checkpoint: boolean;
+  checkpoint_question?: string;
+  dependencies?: number[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface TodoPlan {
+  objective: string;
+  project_id: string;
+  created_at: number;
+  updated_at: number;
+  tasks: TodoTask[];
+  metadata?: Record<string, unknown>;
+}
+
+// =============================================================
+// Tool Results
+// =============================================================
+
+export interface ToolResult {
+  tool: string;
+  success: boolean;
+  output: string;
+  timestamp: number;
+  metadata?: Record<string, unknown>;
 }
 
 // =============================================================
@@ -27,6 +82,7 @@ export interface OrionRPC {
   chat(message: string, images?: Array<{ data: string; mimeType: string }>): Promise<ChatResponse>;
   getHistory(): Promise<{ messages: Message[] }>;
   getArtifacts(): Promise<{ artifacts: Artifact[] }>;
+  getProjects(): Promise<{ projects: ProjectInfo[] }>;
   clear(): Promise<{ ok: boolean }>;
   uploadFile(base64: string, mimeType: string, name: string): Promise<{ success: boolean; file: FileMetadata }>;
   listFiles(): Promise<{ files: FileMetadata[] }>;
@@ -37,10 +93,13 @@ export interface OrionRPC {
 export interface ChatResponse {
   response: string;
   artifacts: Artifact[];
+  state: AgentState;
+  currentProject?: string;
   metadata?: {
     turnsUsed: number;
     toolsUsed: string[];
     thinkingTokens?: number;
+    checkpointReached?: boolean;
   };
 }
 
@@ -48,12 +107,13 @@ export interface StatusResponse {
   sessionId?: string;
   messageCount: number;
   artifactCount: number;
+  currentState: AgentState;
+  currentProject?: string;
   protocol: string;
   promptingStrategy: string;
   metrics: AgentMetrics;
   nativeTools: Record<string, boolean>;
   memory: MemoryMetrics | null;
-  workspace?: WorkspaceMetrics; // ✅ NEW
 }
 
 export interface AgentMetrics {
@@ -63,25 +123,13 @@ export interface AgentMetrics {
   adminTurns: number;
   workerTurns: number;
   thinkingTokensUsed: number;
-  workspaceOperations?: number; // ✅ NEW
-  memorySearches?: number; // ✅ NEW
-  knowledgeSearches?: number; // ✅ NEW
+  checkpointsReached: number;
 }
 
 export interface MemoryMetrics {
-  cacheHits: number;
-  cacheMisses: number;
-  cacheHitRate: number;
-  totalEmbeddings: number;
-  totalSearches: number;
-  cacheSize: number;
-}
-
-// ✅ NEW: Workspace Metrics
-export interface WorkspaceMetrics {
-  enabled: boolean;
-  projectCount: number;
-  activeProjects: number;
+  totalEntries: number;
+  searchCount: number;
+  lastSearchTime?: number;
 }
 
 // =============================================================
@@ -119,14 +167,15 @@ export interface MessagePart {
 }
 
 // =============================================================
-// Artifacts
+// Artifacts & Projects
 // =============================================================
 
 export interface Artifact {
   id: string;
-  type: 'code' | 'research' | 'analysis' | 'content' | 'report';
+  type: 'code' | 'research' | 'analysis' | 'content' | 'report' | 'plan';
   title: string;
   content: string;
+  projectId?: string;
   workerType?: string;
   createdAt: number;
   metadata?: {
@@ -135,8 +184,18 @@ export interface Artifact {
     language?: string;
     confidence?: 'high' | 'medium' | 'low';
     toolsUsed?: string[];
-    projectName?: string; // ✅ NEW: Link to workspace project
   };
+}
+
+export interface ProjectInfo {
+  projectId: string;
+  objective: string;
+  state: AgentState;
+  createdAt: number;
+  updatedAt: number;
+  tasksTotal: number;
+  tasksCompleted: number;
+  workspacePath: string;
 }
 
 // =============================================================
@@ -168,6 +227,7 @@ export interface TaskEnvelope {
     format: 'markdown' | 'json' | 'code' | 'report' | 'html';
   };
   qualityCriteria: string[];
+  projectId?: string;
 }
 
 export type WorkerType =
@@ -192,9 +252,13 @@ export type WSIncomingMessage =
 export type WSOutgoingMessage =
   | { type: 'status'; message: string }
   | { type: 'thought'; content: string }
+  | { type: 'action'; content: string }
+  | { type: 'observation'; content: string }
   | { type: 'chunk'; content: string }
   | { type: 'tool_use'; tool: string; params: any }
   | { type: 'artifact'; artifact: Artifact }
+  | { type: 'checkpoint'; question: string; taskId: number }
+  | { type: 'state_transition'; from: AgentState; to: AgentState }
   | { type: 'worker_started'; message: string; worker: string; taskId: string }
   | { type: 'worker_progress'; message: string; worker: string; taskId: string; progress: number }
   | { type: 'worker_completed'; message: string; worker: string; taskId: string }
@@ -203,7 +267,7 @@ export type WSOutgoingMessage =
   | { type: 'pong' };
 
 // =============================================================
-// Session & State
+// Session
 // =============================================================
 
 export interface Session {
@@ -211,19 +275,8 @@ export interface Session {
   title: string;
   createdAt: number;
   lastActivityAt: number;
-  messageCount: number;
+  messageCount?: number;
   metadata?: Record<string, unknown>;
-}
-
-export interface AgentState {
-  sessionId: string;
-  conversationHistory: Message[];
-  context: {
-    files: FileMetadata[];
-    searchResults: any[];
-    activeProject?: string; // ✅ NEW
-  };
-  lastActivityAt: number;
 }
 
 // =============================================================
@@ -240,7 +293,7 @@ export interface WorkerConfig {
     name: string;
     enabled: boolean;
   }>;
-  outputFormat?: {
+  outputFormat: {
     type: string;
     maxLength: number;
   };
@@ -249,197 +302,15 @@ export interface WorkerConfig {
 }
 
 // =============================================================
-// ✅ NEW: Workspace Types
+// Agent State (for storage)
 // =============================================================
 
-export interface Project {
-  name: string;
-  title: string;
-  status: 'active' | 'paused' | 'completed';
-  progress: string;
-  lastUpdated: string;
-}
-
-export interface ProjectStructure {
-  statusMd: string;
-  todoMd: string;
-  notesMd: string;
-  artifacts: string[];
-}
-
-export interface WorkspaceFile {
-  path: string;
-  name: string;
-  size: number;
-  mimeType: string;
-  lastModified: number;
-}
-
-// =============================================================
-// ✅ NEW: Memory Types (Previously Missing)
-// =============================================================
-
-export interface MemoryEntry {
-  id?: string;
-  content: string;
-  type: 'conversation' | 'artifact' | 'decision' | 'fact';
-  importance: number;
-  timestamp: number;
-  metadata?: Record<string, unknown>;
-}
-
-export interface MemorySearchResult {
-  id: string;
-  content: string;
-  score: number;
-  metadata: Record<string, unknown>;
-}
-
-// =============================================================
-// ✅ NEW: Tool Execution Types
-// =============================================================
-
-export interface ToolCall {
-  toolName: 'memory_search' | 'knowledge_search' | 'workspace' | 'delegate_worker';
-  params: Record<string, any>;
-  rawXml: string;
-}
-
-export interface ToolResult {
-  success: boolean;
-  toolName: string;
-  result?: string;
-  error?: string;
-  metadata?: Record<string, any>;
-}
-
-// =============================================================
-// API Request/Response Types
-// =============================================================
-
-export interface ChatRequest {
-  message: string;
-  images?: Array<{
-    data: string;
-    mimeType: string;
-  }>;
-  sessionId?: string;
-}
-
-export interface HistoryResponse {
-  messages: Message[];
+export interface AgentState {
   sessionId: string;
-}
-
-export interface ArtifactsResponse {
-  artifacts: Artifact[];
-  sessionId: string;
-}
-
-export interface FileUploadRequest {
-  file: File | Blob;
-  name: string;
-  mimeType: string;
-}
-
-export interface FileUploadResponse {
-  success: boolean;
-  file: FileMetadata;
-}
-
-export interface FilesListResponse {
-  files: FileMetadata[];
-}
-
-// ✅ NEW: Workspace API Types
-export interface ProjectsListResponse {
-  projects: Project[];
-}
-
-export interface ProjectResponse {
-  project: Project;
-  structure: ProjectStructure;
-}
-
-export interface ProjectCreateRequest {
-  name: string;
-  title: string;
-  initialNotes?: string;
-}
-
-export interface ProjectUpdateRequest {
-  projectName: string;
-  updates: {
-    title?: string;
-    status?: 'active' | 'paused' | 'completed';
-    progress?: string;
+  conversationHistory: Message[];
+  context: {
+    files: FileMetadata[];
+    searchResults: any[];
   };
-}
-
-export interface ArtifactSaveRequest {
-  projectName: string;
-  filename: string;
-  content: string | ArrayBuffer | Uint8Array;
-  mimeType?: string;
-}
-
-export interface WorkspaceSearchRequest {
-  query: string;
-}
-
-export interface WorkspaceSearchResponse {
-  results: Array<{
-    project: string;
-    file: string;
-    matches: string[];
-  }>;
-}
-
-// =============================================================
-// Error Types
-// =============================================================
-
-export interface APIError {
-  error: string;
-  code?: string;
-  details?: Record<string, any>;
-}
-
-export class WorkspaceError extends Error {
-  constructor(message: string, public code?: string) {
-    super(message);
-    this.name = 'WorkspaceError';
-  }
-}
-
-export class ToolExecutionError extends Error {
-  constructor(message: string, public toolName: string) {
-    super(message);
-    this.name = 'ToolExecutionError';
-  }
-}
-
-// =============================================================
-// Configuration Types
-// =============================================================
-
-export interface OrionConfig {
-  geminiApiKey: string;
-  b2KeyId?: string;
-  b2KeySecret?: string;
-  jwtSecret?: string;
-  adminEmail?: string;
-  adminPasswordHash?: string;
-  maxMessageHistory?: number;
-  maxArtifacts?: number;
-  enableMemory?: boolean;
-  enableWorkspace?: boolean;
-}
-
-export interface SystemMetrics {
-  uptime: number;
-  totalRequests: number;
-  activeConnections: number;
-  storageUsed: number;
-  cacheHitRate: number;
+  lastActivityAt: number;
 }
