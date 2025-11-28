@@ -431,7 +431,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       metrics: this.metrics as any,
       nativeTools: {
         googleSearch: true,
-        googleMaps: true,
+        googleMaps: false,
         codeExecution: true,
         urlContext: true,
         fileSearch: true,
@@ -608,7 +608,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           temperature: 1.0,
           thinkingConfig: { thinkingBudget: 8192, includeThoughts: true },
           useSearch: true,
-          useMaps: true,
+          useMaps: false,
           useCodeExecution: true,
           useFileSearch: files.length > 0,
           images: turn === 1 ? images : undefined,
