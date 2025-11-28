@@ -1,6 +1,6 @@
 // src/workspace/project-manager.ts - Project and Workspace Management
 
-import { Workspace } from './workspace';
+import { B2Workspace } from './workspace';
 import type { TodoPlan, TodoTask, ProjectInfo } from '../types';
 
 export class ProjectManager {
