@@ -26,7 +26,7 @@ import { ProjectManager } from './workspace/project-manager';
 import { PromptBuilder, buildSystemInstruction } from './prompts/prompt-builder';
 import { ToolParser, type ParsedResponse, type ToolCall } from './tools/tool-parser';
 import { workerRegistry } from './workers/worker-registry';
-import { Workspace } from './workspace/workspace';
+import { B2Workspace } from './workspace/workspace';
 
 export class OrionAgent extends DurableObject implements OrionRPC {
   private state: DurableObjectState;
