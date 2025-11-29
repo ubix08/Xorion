@@ -10,7 +10,7 @@ import { AwsClient } from 'aws4fetch';
  * → Perfect for personal agent - everything is shared forever
  */
 
-export class B2Workspace {
+export class Workspace {
   private s3: AwsClient;
   private endpoint: string;
   private bucket: string;
@@ -187,4 +187,4 @@ export class B2Workspace {
     return false;
   }
 }
-export default B2Workspace;
+export default Workspace;
