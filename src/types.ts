@@ -1,4 +1,4 @@
-// src/types.ts - Enhanced Type Definitions with State Management
+// src/types.ts - Refactored Types (Workflow-Based)
 
 import type { DurableObjectNamespace, D1Database, VectorizeIndex } from '@cloudflare/workers-types';
 
@@ -14,64 +14,88 @@ export interface Env {
   JWT_SECRET?: string;
   ADMIN_GMAIL?: string;
   ADMIN_PASSWORD_HASH?: string;
+  
+  // B2 Workspace Configuration
   B2_KEY_ID?: string;
-  B2_KEY_SECRET?: string;
+  B2_APPLICATION_KEY?: string;
+  B2_S3_ENDPOINT?: string;
+  B2_BUCKET?: string;
+  B2_BASE_PATH?: string;
 }
 
 // =============================================================
-// Agent State Machine
+// Conversation Context (Replaces State Machine)
 // =============================================================
 
-export enum AgentState {
-  INITIAL = 'initial',
-  PLANNING = 'planning',
-  EXECUTION = 'execution',
-  COMPLETION = 'completion',
+export interface ConversationContext {
+  sessionId: string;
+  activeProject?: ActiveProject;
+  recentTools: ToolUsage[];
+  conversationPhase: 'discovery' | 'execution' | 'delivery';
 }
 
-export interface StateContext {
-  currentState: AgentState;
-  projectId?: string;
-  todoPath?: string;
-  userRequest: string;
-  observations: string[];
-  toolResults: ToolResult[];
-  checkpointWaiting: boolean;
+export interface ActiveProject {
+  projectId: string;
+  projectPath: string;
+  workflowId?: string;
+  currentStep?: number;
+  totalSteps: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
-// =============================================================
-// Todo Plan Structure
-// =============================================================
-
-export interface TodoTask {
-  id: number;
-  description: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  checkpoint: boolean;
-  checkpoint_question?: string;
-  dependencies?: number[];
-  metadata?: Record<string, unknown>;
-}
-
-export interface TodoPlan {
-  objective: string;
-  project_id: string;
-  created_at: number;
-  updated_at: number;
-  tasks: TodoTask[];
-  metadata?: Record<string, unknown>;
-}
-
-// =============================================================
-// Tool Results
-// =============================================================
-
-export interface ToolResult {
+export interface ToolUsage {
   tool: string;
+  timestamp: number;
   success: boolean;
   output: string;
-  timestamp: number;
+}
+
+// =============================================================
+// Workflow System
+// =============================================================
+
+export interface WorkflowTemplate {
+  id: string;
+  title: string;
+  domain: string;
+  complexity: 'Simple' | 'Medium' | 'Complex';
+  estimatedTime: string;
+  description: string;
+  tools: string[];
+  steps: WorkflowStep[];
   metadata?: Record<string, unknown>;
+}
+
+export interface WorkflowStep {
+  number: number;
+  title: string;
+  description: string;
+  tools: string[];
+  outputs: string[];
+  checkpoint?: boolean;
+  estimatedTurns: number;
+}
+
+export interface TodoDocument {
+  objective: string;
+  projectId: string;
+  workflowId?: string;
+  createdAt: number;
+  updatedAt: number;
+  steps: TodoStep[];
+}
+
+export interface TodoStep {
+  number: number;
+  title: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped';
+  checkpoint: boolean;
+  outputs: string[];
+  startedAt?: number;
+  completedAt?: number;
+  notes?: string;
 }
 
 // =============================================================
@@ -80,9 +104,13 @@ export interface ToolResult {
 
 export interface OrionRPC {
   chat(message: string, images?: Array<{ data: string; mimeType: string }>): Promise<ChatResponse>;
+  executeStep(projectPath: string, stepNumber: number): Promise<StepExecutionResult>;
   getHistory(): Promise<{ messages: Message[] }>;
   getArtifacts(): Promise<{ artifacts: Artifact[] }>;
   getProjects(): Promise<{ projects: ProjectInfo[] }>;
+  listWorkflows(): Promise<{ workflows: WorkflowTemplate[] }>;
+  searchWorkflows(query: string): Promise<{ workflows: WorkflowTemplate[] }>;
+  createProjectFromWorkflow(workflowId: string, objective: string, adaptations?: string): Promise<{ projectId: string; projectPath: string }>;
   clear(): Promise<{ ok: boolean }>;
   uploadFile(base64: string, mimeType: string, name: string): Promise<{ success: boolean; file: FileMetadata }>;
   listFiles(): Promise<{ files: FileMetadata[] }>;
@@ -93,43 +121,63 @@ export interface OrionRPC {
 export interface ChatResponse {
   response: string;
   artifacts: Artifact[];
-  state: AgentState;
-  currentProject?: string;
+  conversationPhase: 'discovery' | 'execution' | 'delivery';
+  suggestedWorkflows?: WorkflowTemplate[];
+  activeProject?: ActiveProject;
   metadata?: {
     turnsUsed: number;
     toolsUsed: string[];
     thinkingTokens?: number;
-    checkpointReached?: boolean;
   };
+}
+
+export interface StepExecutionResult {
+  stepNumber: number;
+  stepTitle: string;
+  status: 'completed' | 'failed' | 'needs_input';
+  response: string;
+  outputs: string[];
+  artifacts: Artifact[];
+  nextStepReady: boolean;
+  turnsUsed: number;
 }
 
 export interface StatusResponse {
   sessionId?: string;
   messageCount: number;
   artifactCount: number;
-  currentState: AgentState;
-  currentProject?: string;
+  conversationPhase: 'discovery' | 'execution' | 'delivery';
+  activeProject?: ActiveProject;
   protocol: string;
-  promptingStrategy: string;
   metrics: AgentMetrics;
   nativeTools: Record<string, boolean>;
   memory: MemoryMetrics | null;
+  workspace: WorkspaceStatus;
+  availableWorkflows: number;
+}
+
+export interface WorkspaceStatus {
+  enabled: boolean;
+  initialized: boolean;
+  projectCount?: number;
 }
 
 export interface AgentMetrics {
   totalRequests: number;
   nativeToolCalls: number;
-  delegations: number;
-  adminTurns: number;
-  workerTurns: number;
+  totalTurns: number;
+  projectsCreated: number;
+  stepsCompleted: number;
   thinkingTokensUsed: number;
-  checkpointsReached: number;
 }
 
 export interface MemoryMetrics {
-  totalEntries: number;
-  searchCount: number;
-  lastSearchTime?: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheHitRate: number;
+  totalEmbeddings: number;
+  totalSearches: number;
+  cacheSize: number;
 }
 
 // =============================================================
@@ -172,17 +220,15 @@ export interface MessagePart {
 
 export interface Artifact {
   id: string;
-  type: 'code' | 'research' | 'analysis' | 'content' | 'report' | 'plan';
+  type: 'code' | 'research' | 'analysis' | 'content' | 'report' | 'data';
   title: string;
   content: string;
   projectId?: string;
-  workerType?: string;
+  stepNumber?: number;
   createdAt: number;
   metadata?: {
-    taskId?: string;
     format?: string;
     language?: string;
-    confidence?: 'high' | 'medium' | 'low';
     toolsUsed?: string[];
   };
 }
@@ -190,11 +236,13 @@ export interface Artifact {
 export interface ProjectInfo {
   projectId: string;
   objective: string;
-  state: AgentState;
+  workflowId?: string;
+  conversationPhase: 'discovery' | 'execution' | 'delivery';
   createdAt: number;
   updatedAt: number;
-  tasksTotal: number;
-  tasksCompleted: number;
+  stepsTotal: number;
+  stepsCompleted: number;
+  currentStep?: number;
   workspacePath: string;
 }
 
@@ -213,41 +261,14 @@ export interface FileMetadata {
 }
 
 // =============================================================
-// Task Delegation
-// =============================================================
-
-export interface TaskEnvelope {
-  taskId: string;
-  workerType: WorkerType;
-  objective: string;
-  context: string;
-  instructions: string;
-  constraints: string[];
-  expectedOutput: {
-    format: 'markdown' | 'json' | 'code' | 'report' | 'html';
-  };
-  qualityCriteria: string[];
-  projectId?: string;
-}
-
-export type WorkerType =
-  | 'deep_search'
-  | 'data_analyst'
-  | 'content_writer'
-  | 'code_developer'
-  | 'report_generator'
-  | 'seo_specialist'
-  | 'editor'
-  | 'synthesizer';
-
-// =============================================================
 // WebSocket Messages
 // =============================================================
 
 export type WSIncomingMessage =
   | { type: 'user_message'; content: string; images?: Array<{ data: string; mimeType: string }> }
+  | { type: 'execute_step'; projectPath: string; stepNumber: number }
   | { type: 'ping' }
-  | { type: 'cancel_task'; taskId?: string };
+  | { type: 'cancel_task' };
 
 export type WSOutgoingMessage =
   | { type: 'status'; message: string }
@@ -257,11 +278,11 @@ export type WSOutgoingMessage =
   | { type: 'chunk'; content: string }
   | { type: 'tool_use'; tool: string; params: any }
   | { type: 'artifact'; artifact: Artifact }
-  | { type: 'checkpoint'; question: string; taskId: number }
-  | { type: 'state_transition'; from: AgentState; to: AgentState }
-  | { type: 'worker_started'; message: string; worker: string; taskId: string }
-  | { type: 'worker_progress'; message: string; worker: string; taskId: string; progress: number }
-  | { type: 'worker_completed'; message: string; worker: string; taskId: string }
+  | { type: 'step_started'; stepNumber: number; stepTitle: string }
+  | { type: 'step_progress'; stepNumber: number; turn: number; maxTurns: number }
+  | { type: 'step_complete'; stepNumber: number; stepTitle: string; outputs: string[]; nextStepReady: boolean }
+  | { type: 'workflow_suggestion'; workflows: WorkflowTemplate[] }
+  | { type: 'project_created'; projectId: string; projectPath: string }
   | { type: 'complete'; response: string; artifacts: Artifact[]; metadata?: any }
   | { type: 'error'; error: string }
   | { type: 'pong' };
@@ -280,37 +301,21 @@ export interface Session {
 }
 
 // =============================================================
-// Worker Configuration
+// Memory Types
 // =============================================================
 
-export interface WorkerConfig {
-  type: WorkerType;
-  name: string;
-  description: string;
-  systemPrompt?: string;
-  capabilities: string[];
-  tools: Array<{
-    name: string;
-    enabled: boolean;
-  }>;
-  outputFormat: {
-    type: string;
-    maxLength: number;
-  };
-  maxTurns: number;
-  temperature: number;
+export interface MemoryEntry {
+  id: string;
+  content: string;
+  type: 'conversation' | 'fact' | 'procedure' | 'observation';
+  importance: number;
+  timestamp: number;
+  metadata?: Record<string, unknown>;
 }
 
-// =============================================================
-// Agent State (for storage)
-// =============================================================
-
-export interface AgentState {
-  sessionId: string;
-  conversationHistory: Message[];
-  context: {
-    files: FileMetadata[];
-    searchResults: any[];
-  };
-  lastActivityAt: number;
+export interface MemorySearchResult {
+  id: string;
+  content: string;
+  score: number;
+  metadata: Record<string, unknown>;
 }
