@@ -1,6 +1,4 @@
-// src/tools/tool-parser.ts - XML Tool Response Parser
-
-import type { TaskEnvelope, WorkerType } from '../types';
+// src/tools/tool-parser.ts - Simplified XML Tool Parser
 
 export interface ParsedResponse {
   narrative: {
@@ -16,14 +14,13 @@ export interface ParsedResponse {
 export type ToolCall =
   | { type: 'response'; content: string }
   | { type: 'ask_user'; content: string }
-  | { type: 'file_tool'; action: string; filePath: string; content?: string }
-  | { type: 'planning_tool'; action: string; todoPath: string; plan?: string; taskId?: number; updates?: string }
-  | { type: 'delegate'; envelope: TaskEnvelope };
+  | { type: 'file_tool'; action: string; path: string; content?: string }
+  | { type: 'workflow_tool'; action: string; query?: string; workflowId?: string; projectPath?: string; stepNumber?: number; adaptations?: string };
 
 export class ToolParser {
   
   // -----------------------------------------------------------
-  // Main Parsing Entry Point
+  // Main Parser
   // -----------------------------------------------------------
   
   static parse(modelResponse: string): ParsedResponse {
@@ -34,13 +31,13 @@ export class ToolParser {
       requiresUserInput: false,
     };
 
-    // Extract narrative elements (THOUGHT, ACTION, OBSERVATION)
+    // Extract narrative
     result.narrative = this.extractNarrative(modelResponse);
 
     // Extract tool calls
     result.toolCalls = this.extractToolCalls(modelResponse);
 
-    // Check for response or user interaction
+    // Set flags
     result.hasResponse = result.toolCalls.some(tc => tc.type === 'response');
     result.requiresUserInput = result.toolCalls.some(tc => tc.type === 'ask_user');
 
@@ -51,22 +48,26 @@ export class ToolParser {
   // Narrative Extraction
   // -----------------------------------------------------------
   
-  private static extractNarrative(text: string): { thought?: string; action?: string; observation?: string } {
-    const narrative: { thought?: string; action?: string; observation?: string } = {};
+  private static extractNarrative(text: string): {
+    thought?: string;
+    action?: string;
+    observation?: string;
+  } {
+    const narrative: any = {};
 
-    // Extract THOUGHT
+    // THOUGHT
     const thoughtMatch = text.match(/THOUGHT:\s*([^\n]+(?:\n(?!(?:ACTION|OBSERVATION|<):)[^\n]+)*)/i);
     if (thoughtMatch) {
       narrative.thought = thoughtMatch[1].trim();
     }
 
-    // Extract ACTION
+    // ACTION
     const actionMatch = text.match(/ACTION:\s*([^\n]+(?:\n(?!(?:THOUGHT|OBSERVATION|<):)[^\n]+)*)/i);
     if (actionMatch) {
       narrative.action = actionMatch[1].trim();
     }
 
-    // Extract OBSERVATION
+    // OBSERVATION
     const obsMatch = text.match(/OBSERVATION:\s*([^\n]+(?:\n(?!(?:THOUGHT|ACTION|<):)[^\n]+)*)/i);
     if (obsMatch) {
       narrative.observation = obsMatch[1].trim();
@@ -101,18 +102,11 @@ export class ToolParser {
       if (fileTool) calls.push(fileTool);
     }
 
-    // <planning_tool>
-    const planningToolMatches = this.extractXMLTag(text, 'planning_tool');
-    for (const content of planningToolMatches) {
-      const planningTool = this.parsePlanningTool(content);
-      if (planningTool) calls.push(planningTool);
-    }
-
-    // <delegate>
-    const delegateMatches = this.extractXMLTag(text, 'delegate');
-    for (const content of delegateMatches) {
-      const delegate = this.parseDelegate(content);
-      if (delegate) calls.push(delegate);
+    // <workflow_tool>
+    const workflowToolMatches = this.extractXMLTag(text, 'workflow_tool');
+    for (const content of workflowToolMatches) {
+      const workflowTool = this.parseWorkflowTool(content);
+      if (workflowTool) calls.push(workflowTool);
     }
 
     return calls;
@@ -145,70 +139,43 @@ export class ToolParser {
     };
 
     const action = extract('action');
-    const filePath = extract('file_path');
+    const path = extract('path');
     const fileContent = extract('content');
 
-    if (!action || !filePath) return null;
+    if (!action || !path) return null;
 
     return {
       type: 'file_tool',
       action,
-      filePath,
+      path,
       content: fileContent || undefined,
     };
   }
 
-  private static parsePlanningTool(content: string): ToolCall | null {
+  private static parseWorkflowTool(content: string): ToolCall | null {
     const extract = (tag: string): string => {
       const match = content.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i'));
       return match ? match[1].trim() : '';
     };
 
     const action = extract('action');
-    const todoPath = extract('todo_path');
-    const plan = extract('plan');
-    const taskIdStr = extract('task_id');
-    const updates = extract('updates');
+    const query = extract('query');
+    const workflowId = extract('workflow_id');
+    const projectPath = extract('project_path');
+    const stepNumberStr = extract('step_number');
+    const adaptations = extract('adaptations');
 
-    if (!action || !todoPath) return null;
+    if (!action) return null;
 
     return {
-      type: 'planning_tool',
+      type: 'workflow_tool',
       action,
-      todoPath,
-      plan: plan || undefined,
-      taskId: taskIdStr ? parseInt(taskIdStr, 10) : undefined,
-      updates: updates || undefined,
+      query: query || undefined,
+      workflowId: workflowId || undefined,
+      projectPath: projectPath || undefined,
+      stepNumber: stepNumberStr ? parseInt(stepNumberStr, 10) : undefined,
+      adaptations: adaptations || undefined,
     };
-  }
-
-  private static parseDelegate(content: string): ToolCall | null {
-    const extract = (tag: string): string => {
-      const match = content.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i'));
-      return match ? match[1].trim() : '';
-    };
-
-    const workerType = extract('worker') as WorkerType;
-    const objective = extract('objective');
-    const context = extract('context');
-    const instructions = extract('instructions');
-    const format = extract('format');
-    const quality = extract('quality');
-
-    if (!workerType || !objective) return null;
-
-    const envelope: TaskEnvelope = {
-      taskId: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      workerType,
-      objective,
-      context,
-      instructions,
-      constraints: [],
-      expectedOutput: { format: (format as any) || 'markdown' },
-      qualityCriteria: quality ? quality.split('\n').filter(Boolean) : [],
-    };
-
-    return { type: 'delegate', envelope };
   }
 
   // -----------------------------------------------------------
