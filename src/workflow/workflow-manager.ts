@@ -1,560 +1,1142 @@
-// src/workflow/workflow-manager.ts - Workflow Template Management with RAG
+// src/durable-agent.ts - Refactored AI-Collaborator Agent
 
-import { Workspace } from '../workspace/workspace';
-import type { GeminiClient } from '../gemini';
-import type { VectorizeIndex } from '@cloudflare/workers-types';
-import type { WorkflowTemplate, WorkflowStep, TodoDocument, TodoStep } from '../types';
+import { DurableObject } from 'cloudflare:workers';
+import type { DurableObjectState } from '@cloudflare/workers-types';
+import type {
+  Env,
+  Message,
+  Artifact,
+  WSOutgoingMessage,
+  WSIncomingMessage,
+  OrionRPC,
+  ChatResponse,
+  StatusResponse,
+  FileMetadata,
+  ConversationContext,
+  StepExecutionResult,
+  WorkflowTemplate,
+  TodoDocument,
+} from './types';
+import { GeminiClient } from './gemini';
+import { DurableStorage } from './durable-storage';
+import { D1Manager } from './storage/d1-manager';
+import { MemoryManager } from './memory/memory-manager';
+import { WorkflowManager } from './workflow/workflow-manager';
+import { buildSystemPrompt } from './prompts/system-prompt';
+import { ToolParser, type ParsedResponse } from './tools/tool-parser';
+import { Workspace } from './workspace/workspace';
 
-export class WorkflowManager {
-  private vectorize: VectorizeIndex | null;
+export class OrionAgent extends DurableObject implements OrionRPC {
+  private state: DurableObjectState;
+  private storage: DurableStorage;
   private gemini: GeminiClient;
-  private sessionId: string;
-  private templatesBasePath = 'workflows/templates';
+  private env: Env;
+  private d1?: D1Manager;
+  private memory?: MemoryManager;
+  private workflow?: WorkflowManager;
+  private sessionId?: string;
+  private initialized = false;
   
-  // Cache for loaded templates
-  private templateCache = new Map<string, WorkflowTemplate>();
+  private systemInstruction: string;
+  
+  private metrics = {
+    totalRequests: 0,
+    nativeToolCalls: 0,
+    totalTurns: 0,
+    projectsCreated: 0,
+    stepsCompleted: 0,
+    thinkingTokensUsed: 0,
+  };
 
-  constructor(
-    vectorize: VectorizeIndex | null,
-    gemini: GeminiClient,
-    sessionId: string
-  ) {
-    this.vectorize = vectorize;
-    this.gemini = gemini;
-    this.sessionId = sessionId;
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    this.state = state;
+    this.env = env;
+    this.storage = new DurableStorage(state);
+    this.gemini = new GeminiClient({ apiKey: env.GEMINI_API_KEY });
+    this.systemInstruction = buildSystemPrompt();
+    
+    const name = state.id.name;
+    if (name?.startsWith('session:')) {
+      this.sessionId = name.slice(8);
+    }
   }
 
-  // -----------------------------------------------------------
-  // Template Discovery & RAG Search
-  // -----------------------------------------------------------
+  private async init(): Promise<void> {
+    if (this.initialized) return;
+    
+    if (this.env.DB) {
+      this.d1 = new D1Manager(this.env.DB);
+    }
+    
+    if (this.sessionId) {
+      if (this.env.VECTORIZE) {
+        this.memory = new MemoryManager(
+          this.env.VECTORIZE,
+          this.gemini,
+          this.sessionId,
+          {}
+        );
+        
+        // Initialize workflow manager with RAG
+        this.workflow = new WorkflowManager(
+          this.env.VECTORIZE,
+          this.gemini,
+          this.sessionId
+        );
+      } else {
+        // Workflow manager without RAG (list-based fallback)
+        this.workflow = new WorkflowManager(
+          null,
+          this.gemini,
+          this.sessionId
+        );
+      }
+      
+      // Hydrate from D1
+      if (this.d1 && this.storage.getMessages().length === 0) {
+        await this.hydrateFromD1();
+      }
+    }
+    
+    this.initialized = true;
+  }
 
-  async searchTemplates(query: string, limit = 3): Promise<WorkflowTemplate[]> {
-    if (!this.vectorize) {
-      console.warn('[WorkflowManager] Vectorize not available - falling back to list all');
-      return await this.listAllTemplates();
+  private async hydrateFromD1(): Promise<void> {
+    if (!this.d1 || !this.sessionId) return;
+    try {
+      const messages = await this.d1.loadMessages(this.sessionId, 100);
+      for (const msg of messages) {
+        await this.storage.saveMessage(
+          msg.role as 'user' | 'model',
+          msg.parts || [],
+          msg.timestamp
+        );
+      }
+    } catch (e) {
+      console.warn('[Agent] Hydration failed:', e);
+    }
+  }
+
+  // =============================================================
+  // RPC Interface Implementation
+  // =============================================================
+
+  async chat(
+    message: string,
+    images?: Array<{ data: string; mimeType: string }>
+  ): Promise<ChatResponse> {
+    await this.init();
+    
+    if (!message?.trim()) {
+      throw new Error('Message cannot be empty');
+    }
+
+    this.metrics.totalRequests++;
+    
+    const result = await this.executeConversationLoop(message, images);
+    
+    return {
+      response: result.response,
+      artifacts: result.artifacts,
+      conversationPhase: result.phase,
+      suggestedWorkflows: result.suggestedWorkflows,
+      activeProject: result.activeProject,
+      metadata: {
+        turnsUsed: result.turnsUsed,
+        toolsUsed: result.toolsUsed,
+        thinkingTokens: result.thinkingTokens,
+      },
+    } as ChatResponse;
+  }
+
+  async executeStep(projectPath: string, stepNumber: number): Promise<StepExecutionResult> {
+    await this.init();
+    
+    if (!this.workflow) {
+      throw new Error('Workflow manager not initialized');
+    }
+
+    return await this.executeStepExecution(projectPath, stepNumber);
+  }
+
+  async getHistory(): Promise<{ messages: Message[] }> {
+    await this.init();
+    return { messages: this.storage.getMessages() };
+  }
+
+  async getArtifacts(): Promise<{ artifacts: Artifact[] }> {
+    await this.init();
+    return { artifacts: this.storage.getArtifacts() };
+  }
+
+  async getProjects(): Promise<{ projects: import('./types').ProjectInfo[] }> {
+    await this.init();
+    
+    if (!this.workflow || !this.sessionId || !Workspace.isInitialized()) {
+      return { projects: [] };
     }
 
     try {
-      // Generate query embedding
-      const queryEmbedding = await this.gemini.embedText(query, { normalize: true });
+      const sessionPath = this.sessionId;
+      const items = await Workspace.readdir(sessionPath);
+      const projects: import('./types').ProjectInfo[] = [];
 
-      // Search Vectorize
-      const results = await this.vectorize.query(queryEmbedding, {
-        topK: limit,
-        filter: { type: 'workflow_template' },
-        returnMetadata: true,
-      });
+      for (const item of items) {
+        if (item.startsWith('project_')) {
+          const projectPath = `${sessionPath}/${item}`;
+          const todo = await this.workflow.loadTodoDocument(projectPath);
+          
+          if (todo) {
+            const progress = this.workflow.getProgress(todo);
+            const phase: 'discovery' | 'execution' | 'delivery' = 
+              progress.percentage === 0 ? 'discovery' :
+              progress.percentage === 100 ? 'delivery' : 'execution';
 
-      const templates: WorkflowTemplate[] = [];
-
-      for (const match of results.matches || []) {
-        if (match.score >= 0.6) {
-          const templateId = match.metadata?.template_id as string;
-          if (templateId) {
-            const template = await this.getTemplate(templateId);
-            if (template) templates.push(template);
+            projects.push({
+              projectId: item,
+              objective: todo.objective,
+              workflowId: todo.workflowId,
+              conversationPhase: phase,
+              createdAt: todo.createdAt,
+              updatedAt: todo.updatedAt,
+              stepsTotal: progress.total,
+              stepsCompleted: progress.completed,
+              currentStep: this.workflow.getCurrentStep(todo)?.number,
+              workspacePath: projectPath,
+            });
           }
         }
       }
 
-      return templates;
+      projects.sort((a, b) => b.updatedAt - a.updatedAt);
+      return { projects };
     } catch (e) {
-      console.error('[WorkflowManager] Search failed:', e);
-      return await this.listAllTemplates();
+      console.error('[Agent] Failed to list projects:', e);
+      return { projects: [] };
     }
   }
 
-  async listAllTemplates(): Promise<WorkflowTemplate[]> {
-    if (!Workspace.isInitialized()) {
-      console.warn('[WorkflowManager] Workspace not initialized');
-      return [];
+  async listWorkflows(): Promise<{ workflows: WorkflowTemplate[] }> {
+    await this.init();
+    
+    if (!this.workflow) {
+      throw new Error('Workflow manager not initialized');
     }
 
-    try {
-      const files = await Workspace.readdir(this.templatesBasePath);
-      const templates: WorkflowTemplate[] = [];
-
-      for (const file of files) {
-        if (file.endsWith('.md')) {
-          const templateId = file.replace('.md', '');
-          const template = await this.getTemplate(templateId);
-          if (template) templates.push(template);
-        }
-      }
-
-      return templates;
-    } catch (e) {
-      console.warn('[WorkflowManager] List templates failed:', e);
-      return [];
-    }
+    const workflows = await this.workflow.listAllTemplates();
+    return { workflows };
   }
 
-  async getTemplate(templateId: string): Promise<WorkflowTemplate | null> {
-    // Check cache
-    if (this.templateCache.has(templateId)) {
-      return this.templateCache.get(templateId)!;
+  async searchWorkflows(query: string): Promise<{ workflows: WorkflowTemplate[] }> {
+    await this.init();
+    
+    if (!this.workflow) {
+      throw new Error('Workflow manager not initialized');
     }
 
-    if (!Workspace.isInitialized()) {
-      console.warn('[WorkflowManager] Workspace not initialized');
-      return null;
-    }
-
-    try {
-      const path = `${this.templatesBasePath}/${templateId}.md`;
-      const content = await Workspace.readFileText(path);
-      const template = this.parseTemplateMarkdown(templateId, content);
-      
-      // Cache it
-      this.templateCache.set(templateId, template);
-      
-      return template;
-    } catch (e) {
-      console.error(`[WorkflowManager] Failed to load template ${templateId}:`, e);
-      return null;
-    }
+    const workflows = await this.workflow.searchTemplates(query, 3);
+    return { workflows };
   }
 
-  // -----------------------------------------------------------
-  // Template Indexing (for RAG)
-  // -----------------------------------------------------------
-
-  async indexTemplate(templateId: string): Promise<boolean> {
-    if (!this.vectorize) {
-      console.warn('[WorkflowManager] Vectorize not available - skipping indexing');
-      return false;
-    }
-
-    try {
-      const template = await this.getTemplate(templateId);
-      if (!template) return false;
-
-      // Create searchable text
-      const searchableText = `
-${template.title}
-${template.description}
-Domain: ${template.domain}
-Tools: ${template.tools.join(', ')}
-Steps: ${template.steps.map(s => s.title).join(', ')}
-      `.trim();
-
-      // Generate embedding
-      const embedding = await this.gemini.embedText(searchableText, { normalize: true });
-
-      // Upsert to Vectorize
-      await this.vectorize.upsert([{
-        id: `workflow_${templateId}`,
-        values: embedding,
-        metadata: {
-          type: 'workflow_template',
-          template_id: templateId,
-          title: template.title,
-          domain: template.domain,
-          complexity: template.complexity,
-        },
-      }]);
-
-      console.log(`[WorkflowManager] Indexed template: ${templateId}`);
-      return true;
-    } catch (e) {
-      console.error(`[WorkflowManager] Failed to index template ${templateId}:`, e);
-      return false;
-    }
-  }
-
-  async indexAllTemplates(): Promise<number> {
-    const templates = await this.listAllTemplates();
-    let indexed = 0;
-
-    for (const template of templates) {
-      const success = await this.indexTemplate(template.id);
-      if (success) indexed++;
-    }
-
-    console.log(`[WorkflowManager] Indexed ${indexed}/${templates.length} templates`);
-    return indexed;
-  }
-
-  // -----------------------------------------------------------
-  // Project Creation from Template
-  // -----------------------------------------------------------
-
-  async createProjectFromTemplate(
+  async createProjectFromWorkflow(
     workflowId: string,
     objective: string,
     adaptations?: string
   ): Promise<{ projectId: string; projectPath: string }> {
-    if (!Workspace.isInitialized()) {
-      throw new Error('[WorkflowManager] Workspace not initialized');
+    await this.init();
+    
+    if (!this.workflow) {
+      throw new Error('Workflow manager not initialized');
     }
 
-    const template = await this.getTemplate(workflowId);
-    if (!template) {
-      throw new Error(`[WorkflowManager] Template not found: ${workflowId}`);
-    }
-
-    // Generate project ID
-    const projectId = `project_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const projectPath = `${this.sessionId}/${projectId}`;
-
-    try {
-      console.log(`[WorkflowManager] Creating project: ${projectId} from ${workflowId}`);
-
-      // Create project structure
-      await Workspace.createDirectoryStructure(projectPath, [
-        'data',
-        'results',
-        'artifacts',
-      ]);
-
-      // Create adapted todo.md
-      const todoDoc = await this.adaptTemplate(template, objective, adaptations);
-      await this.saveTodoDocument(projectPath, todoDoc);
-
-      // Create README
-      await Workspace.writeFile(
-        `${projectPath}/README.md`,
-        this.generateReadme(projectId, objective, template)
-      );
-
-      console.log(`[WorkflowManager] ✅ Project created: ${projectId}`);
-      return { projectId, projectPath };
-    } catch (e) {
-      const error = e instanceof Error ? e.message : String(e);
-      throw new Error(`[WorkflowManager] Project creation failed: ${error}`);
-    }
-  }
-
-  // -----------------------------------------------------------
-  // Todo Document Management
-  // -----------------------------------------------------------
-
-  async saveTodoDocument(projectPath: string, todo: TodoDocument): Promise<void> {
-    const markdown = this.generateTodoMarkdown(todo);
-    await Workspace.writeFile(`${projectPath}/todo.md`, markdown);
-    console.log(`[WorkflowManager] Saved todo.md for ${todo.projectId}`);
-  }
-
-  async loadTodoDocument(projectPath: string): Promise<TodoDocument | null> {
-    try {
-      const content = await Workspace.readFileText(`${projectPath}/todo.md`);
-      return this.parseTodoMarkdown(content);
-    } catch (e) {
-      console.error('[WorkflowManager] Failed to load todo.md:', e);
-      return null;
-    }
-  }
-
-  async updateStepStatus(
-    projectPath: string,
-    stepNumber: number,
-    status: 'pending' | 'in_progress' | 'completed' | 'skipped',
-    notes?: string
-  ): Promise<void> {
-    const todo = await this.loadTodoDocument(projectPath);
-    if (!todo) throw new Error('Todo document not found');
-
-    const step = todo.steps.find(s => s.number === stepNumber);
-    if (!step) throw new Error(`Step ${stepNumber} not found`);
-
-    step.status = status;
-    if (notes) step.notes = notes;
-
-    if (status === 'in_progress' && !step.startedAt) {
-      step.startedAt = Date.now();
-    }
-    if (status === 'completed' && !step.completedAt) {
-      step.completedAt = Date.now();
-    }
-
-    todo.updatedAt = Date.now();
-    await this.saveTodoDocument(projectPath, todo);
-  }
-
-  getCurrentStep(todo: TodoDocument): TodoStep | null {
-    // Find in_progress step
-    let step = todo.steps.find(s => s.status === 'in_progress');
-    if (step) return step;
-
-    // Find next pending step
-    step = todo.steps.find(s => s.status === 'pending');
-    return step || null;
-  }
-
-  getProgress(todo: TodoDocument): { completed: number; total: number; percentage: number } {
-    const completed = todo.steps.filter(s => s.status === 'completed').length;
-    const total = todo.steps.length;
-    const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
-    return { completed, total, percentage };
-  }
-
-  // -----------------------------------------------------------
-  // Template Parsing
-  // -----------------------------------------------------------
-
-  private parseTemplateMarkdown(templateId: string, markdown: string): WorkflowTemplate {
-    // Extract frontmatter
-    const frontmatterMatch = markdown.match(/^---\n([\s\S]*?)\n---/);
-    let title = templateId;
-    let domain = 'General';
-    let complexity: 'Simple' | 'Medium' | 'Complex' = 'Medium';
-    let estimatedTime = 'Varies';
-    let tools: string[] = [];
-
-    if (frontmatterMatch) {
-      const frontmatter = frontmatterMatch[1];
-      const titleMatch = frontmatter.match(/title:\s*(.+)/);
-      const domainMatch = frontmatter.match(/domain:\s*(.+)/);
-      const complexityMatch = frontmatter.match(/complexity:\s*(.+)/);
-      const timeMatch = frontmatter.match(/estimatedTime:\s*(.+)/);
-      const toolsMatch = frontmatter.match(/tools:\s*\[(.*?)\]/);
-
-      if (titleMatch) title = titleMatch[1].trim();
-      if (domainMatch) domain = domainMatch[1].trim();
-      if (complexityMatch) complexity = complexityMatch[1].trim() as any;
-      if (timeMatch) estimatedTime = timeMatch[1].trim();
-      if (toolsMatch) tools = toolsMatch[1].split(',').map(t => t.trim());
-    }
-
-    // Extract description (first paragraph after frontmatter)
-    const contentAfterFrontmatter = markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
-    const descMatch = contentAfterFrontmatter.match(/^#[^\n]*\n\n([^\n]+)/);
-    const description = descMatch ? descMatch[1].trim() : 'No description';
-
-    // Extract steps
-    const steps = this.extractStepsFromMarkdown(contentAfterFrontmatter);
-
-    return {
-      id: templateId,
-      title,
-      domain,
-      complexity,
-      estimatedTime,
-      description,
-      tools,
-      steps,
-    };
-  }
-
-  private extractStepsFromMarkdown(markdown: string): WorkflowStep[] {
-    const steps: WorkflowStep[] = [];
-    const stepRegex = /## Step (\d+):\s*([^\n]+)\n([\s\S]*?)(?=\n## Step \d+:|$)/g;
-    let match;
-
-    while ((match = stepRegex.exec(markdown)) !== null) {
-      const number = parseInt(match[1], 10);
-      const title = match[2].trim();
-      const content = match[3].trim();
-
-      // Extract description
-      const descMatch = content.match(/^([^\n]+)/);
-      const description = descMatch ? descMatch[1].trim() : title;
-
-      // Extract outputs
-      const outputsMatch = content.match(/\*\*Expected Outputs?\*\*:\s*([^\n]+)/);
-      const outputs = outputsMatch
-        ? outputsMatch[1].split(',').map(o => o.trim())
-        : [];
-
-      // Check if checkpoint
-      const checkpoint = content.toLowerCase().includes('checkpoint') ||
-                        content.toLowerCase().includes('review');
-
-      steps.push({
-        number,
-        title,
-        description,
-        tools: [],
-        outputs,
-        checkpoint,
-        estimatedTurns: 3,
-      });
-    }
-
-    return steps;
-  }
-
-  // -----------------------------------------------------------
-  // Template Adaptation
-  // -----------------------------------------------------------
-
-  private async adaptTemplate(
-    template: WorkflowTemplate,
-    objective: string,
-    adaptations?: string
-  ): Promise<TodoDocument> {
-    const todoSteps: TodoStep[] = template.steps.map(step => ({
-      number: step.number,
-      title: step.title,
-      description: step.description,
-      status: 'pending',
-      checkpoint: step.checkpoint,
-      outputs: step.outputs,
-    }));
-
-    return {
+    const result = await this.workflow.createProjectFromTemplate(
+      workflowId,
       objective,
-      projectId: '', // Will be set when saving
-      workflowId: template.id,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      steps: todoSteps,
-    };
+      adaptations
+    );
+
+    this.metrics.projectsCreated++;
+    
+    return result;
   }
 
-  // -----------------------------------------------------------
-  // Markdown Generation
-  // -----------------------------------------------------------
+  async clear(): Promise<{ ok: boolean }> {
+    await this.init();
+    await this.storage.clearAll();
+    if (this.memory) await this.memory.clearSessionMemory();
+    return { ok: true };
+  }
 
-  private generateTodoMarkdown(todo: TodoDocument): string {
-    const lines: string[] = [];
+  async uploadFile(
+    base64: string,
+    mimeType: string,
+    name: string
+  ): Promise<{ success: boolean; file: FileMetadata }> {
+    await this.init();
+    const metadata = await this.gemini.uploadFile(base64, mimeType, name);
+    return { success: true, file: metadata };
+  }
 
-    lines.push(`# ${todo.objective}`);
-    lines.push('');
-    lines.push(`**Project ID**: \`${todo.projectId}\``);
-    if (todo.workflowId) lines.push(`**Workflow**: ${todo.workflowId}`);
-    lines.push(`**Created**: ${new Date(todo.createdAt).toISOString()}`);
-    lines.push(`**Updated**: ${new Date(todo.updatedAt).toISOString()}`);
-    lines.push('');
+  async listFiles(): Promise<{ files: FileMetadata[] }> {
+    await this.init();
+    const files = await this.gemini.listFiles();
+    return { files };
+  }
 
-    const progress = this.getProgress(todo);
-    lines.push('## Progress');
-    lines.push('');
-    lines.push(`- ✅ Completed: ${progress.completed}/${progress.total}`);
-    lines.push(`- 📊 Overall: ${progress.percentage}%`);
-    lines.push('');
+  async deleteFile(fileUri: string): Promise<{ ok: boolean }> {
+    await this.init();
+    await this.gemini.deleteFile(fileUri);
+    return { ok: true };
+  }
 
-    lines.push('## Steps');
-    lines.push('');
-
-    for (const step of todo.steps) {
-      const icon = step.status === 'completed' ? '✅'
-                 : step.status === 'in_progress' ? '🔄'
-                 : step.status === 'skipped' ? '⏭️'
-                 : '⏸️';
-
-      const checkpoint = step.checkpoint ? ' 🚦 **CHECKPOINT**' : '';
-
-      lines.push(`### ${icon} Step ${step.number}: ${step.title}${checkpoint}`);
-      lines.push('');
-      lines.push(step.description);
-      lines.push('');
-      lines.push(`**Status**: ${step.status}`);
-      lines.push('');
-
-      if (step.outputs.length > 0) {
-        lines.push(`**Expected Outputs**: ${step.outputs.join(', ')}`);
-        lines.push('');
+  async getStatus(): Promise<StatusResponse> {
+    await this.init();
+    
+    let projectCount = 0;
+    let availableWorkflows = 0;
+    
+    if (Workspace.isInitialized()) {
+      if (this.sessionId) {
+        try {
+          const items = await Workspace.readdir(this.sessionId);
+          projectCount = items.filter(i => i.startsWith('project_')).length;
+        } catch {}
       }
-
-      if (step.notes) {
-        lines.push(`**Notes**: ${step.notes}`);
-        lines.push('');
+      
+      if (this.workflow) {
+        try {
+          const workflows = await this.workflow.listAllTemplates();
+          availableWorkflows = workflows.length;
+        } catch {}
       }
     }
-
-    return lines.join('\n');
+    
+    const context = await this.getConversationContext();
+    
+    return {
+      sessionId: this.sessionId,
+      messageCount: this.storage.getMessages().length,
+      artifactCount: this.storage.getArtifacts().length,
+      conversationPhase: context.conversationPhase,
+      activeProject: context.activeProject,
+      protocol: 'Conversational AI-Collaborator with Workflow Templates',
+      metrics: this.metrics,
+      nativeTools: {
+        googleSearch: true,
+        codeExecution: true,
+        fileSearch: true,
+        thinking: true,
+      },
+      memory: this.memory ? this.memory.getMetrics() : null,
+      workspace: {
+        enabled: Workspace.isInitialized(),
+        initialized: Workspace.isInitialized(),
+        projectCount,
+      },
+      availableWorkflows,
+    } as StatusResponse;
   }
 
-  private parseTodoMarkdown(markdown: string): TodoDocument | null {
+  // =============================================================
+  // WebSocket Support
+  // =============================================================
+
+  async fetch(request: Request): Promise<Response> {
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader?.toLowerCase() === 'websocket') {
+      return this.handleWebSocketUpgrade(request);
+    }
+    return new Response('Use RPC methods for API calls', {
+      status: 400,
+      headers: { 'Content-Type': 'text/plain' },
+    });
+  }
+
+  private handleWebSocketUpgrade(request: Request): Response {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    // @ts-ignore
+    this.state.acceptWebSocket(server);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (typeof message !== 'string') return;
+    
     try {
-      // Extract objective (title)
-      const titleMatch = markdown.match(/^# (.+)/m);
-      const objective = titleMatch ? titleMatch[1].trim() : 'Unknown Objective';
-
-      // Extract project ID
-      const projectIdMatch = markdown.match(/\*\*Project ID\*\*:\s*`([^`]+)`/);
-      const projectId = projectIdMatch ? projectIdMatch[1].trim() : '';
-
-      // Extract workflow ID
-      const workflowIdMatch = markdown.match(/\*\*Workflow\*\*:\s*(.+)/);
-      const workflowId = workflowIdMatch ? workflowIdMatch[1].trim() : undefined;
-
-      // Extract timestamps
-      const createdMatch = markdown.match(/\*\*Created\*\*:\s*(.+)/);
-      const updatedMatch = markdown.match(/\*\*Updated\*\*:\s*(.+)/);
-      const createdAt = createdMatch ? new Date(createdMatch[1].trim()).getTime() : Date.now();
-      const updatedAt = updatedMatch ? new Date(updatedMatch[1].trim()).getTime() : Date.now();
-
-      // Extract steps
-      const steps: TodoStep[] = [];
-      const stepRegex = /### [^\s]+ Step (\d+):\s*([^\n🚦]+)(?:🚦\s*\*\*CHECKPOINT\*\*)?\n([\s\S]*?)(?=\n### |$)/g;
-      let match;
-
-      while ((match = stepRegex.exec(markdown)) !== null) {
-        const number = parseInt(match[1], 10);
-        const title = match[2].trim();
-        const content = match[3].trim();
-
-        const statusMatch = content.match(/\*\*Status\*\*:\s*(\w+)/);
-        const status = (statusMatch ? statusMatch[1] : 'pending') as TodoStep['status'];
-
-        const outputsMatch = content.match(/\*\*Expected Outputs\*\*:\s*([^\n]+)/);
-        const outputs = outputsMatch
-          ? outputsMatch[1].split(',').map(o => o.trim())
-          : [];
-
-        const notesMatch = content.match(/\*\*Notes\*\*:\s*([^\n]+)/);
-        const notes = notesMatch ? notesMatch[1].trim() : undefined;
-
-        const checkpoint = match[0].includes('🚦');
-
-        const descMatch = content.match(/^([^\n]+)/);
-        const description = descMatch ? descMatch[1].trim() : title;
-
-        steps.push({
-          number,
-          title,
-          description,
-          status,
-          checkpoint,
-          outputs,
-          notes,
-        });
+      const msg: WSIncomingMessage = JSON.parse(message);
+      
+      switch (msg.type) {
+        case 'user_message':
+          await this.handleWebSocketChat(ws, msg.content, msg.images);
+          break;
+        case 'execute_step':
+          await this.handleWebSocketStepExecution(ws, msg.projectPath, msg.stepNumber);
+          break;
+        case 'ping':
+          ws.send(JSON.stringify({ type: 'pong' } as WSOutgoingMessage));
+          break;
       }
+    } catch (e) {
+      console.error('[Agent] WebSocket error:', e);
+      ws.send(
+        JSON.stringify({
+          type: 'error',
+          error: e instanceof Error ? e.message : String(e),
+        } as WSOutgoingMessage)
+      );
+    }
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+    console.log(`[Agent] WebSocket closed: ${code} - ${reason} (clean: ${wasClean})`);
+  }
+
+  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    console.error('[Agent] WebSocket error:', error);
+  }
+
+  private async handleWebSocketChat(
+    ws: WebSocket,
+    message: string,
+    images?: Array<{ data: string; mimeType: string }>
+  ): Promise<void> {
+    await this.init();
+    
+    const callbacks = {
+      onStatus: (msg: string) =>
+        ws.send(JSON.stringify({ type: 'status', message: msg } as WSOutgoingMessage)),
+      onThought: (thought: string) =>
+        ws.send(JSON.stringify({ type: 'thought', content: thought } as WSOutgoingMessage)),
+      onAction: (action: string) =>
+        ws.send(JSON.stringify({ type: 'action', content: action } as WSOutgoingMessage)),
+      onObservation: (obs: string) =>
+        ws.send(JSON.stringify({ type: 'observation', content: obs } as WSOutgoingMessage)),
+      onChunk: (chunk: string) =>
+        ws.send(JSON.stringify({ type: 'chunk', content: chunk } as WSOutgoingMessage)),
+      onToolUse: (tool: string, params: any) =>
+        ws.send(JSON.stringify({ type: 'tool_use', tool, params } as WSOutgoingMessage)),
+      onArtifact: (artifact: Artifact) =>
+        ws.send(JSON.stringify({ type: 'artifact', artifact } as WSOutgoingMessage)),
+    };
+    
+    try {
+      const result = await this.executeConversationLoop(message, images, callbacks);
+      
+      ws.send(
+        JSON.stringify({
+          type: 'complete',
+          response: result.response,
+          artifacts: result.artifacts,
+          metadata: {
+            turnsUsed: result.turnsUsed,
+            toolsUsed: result.toolsUsed,
+            thinkingTokens: result.thinkingTokens,
+          },
+        } as WSOutgoingMessage)
+      );
+    } catch (error) {
+      ws.send(
+        JSON.stringify({
+          type: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        } as WSOutgoingMessage)
+      );
+    }
+  }
+
+  private async handleWebSocketStepExecution(
+    ws: WebSocket,
+    projectPath: string,
+    stepNumber: number
+  ): Promise<void> {
+    await this.init();
+    
+    const callbacks = {
+      onStatus: (msg: string) =>
+        ws.send(JSON.stringify({ type: 'status', message: msg } as WSOutgoingMessage)),
+      onThought: (thought: string) =>
+        ws.send(JSON.stringify({ type: 'thought', content: thought } as WSOutgoingMessage)),
+      onAction: (action: string) =>
+        ws.send(JSON.stringify({ type: 'action', content: action } as WSOutgoingMessage)),
+      onObservation: (obs: string) =>
+        ws.send(JSON.stringify({ type: 'observation', content: obs } as WSOutgoingMessage)),
+      onChunk: (chunk: string) =>
+        ws.send(JSON.stringify({ type: 'chunk', content: chunk } as WSOutgoingMessage)),
+      onToolUse: (tool: string, params: any) =>
+        ws.send(JSON.stringify({ type: 'tool_use', tool, params } as WSOutgoingMessage)),
+      onArtifact: (artifact: Artifact) =>
+        ws.send(JSON.stringify({ type: 'artifact', artifact } as WSOutgoingMessage)),
+    };
+    
+    try {
+      ws.send(JSON.stringify({ type: 'step_started', stepNumber, stepTitle: '' } as WSOutgoingMessage));
+      
+      const result = await this.executeStepExecution(projectPath, stepNumber, callbacks);
+      
+      ws.send(
+        JSON.stringify({
+          type: 'step_complete',
+          stepNumber: result.stepNumber,
+          stepTitle: result.stepTitle,
+          outputs: result.outputs,
+          nextStepReady: result.nextStepReady,
+        } as WSOutgoingMessage)
+      );
+    } catch (error) {
+      ws.send(
+        JSON.stringify({
+          type: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        } as WSOutgoingMessage)
+      );
+    }
+  }
+
+  // =============================================================
+  // Core Conversation Loop (Refactored)
+  // =============================================================
+
+  private async executeConversationLoop(
+    userMessage: string,
+    images?: Array<{ data: string; mimeType: string }>,
+    callbacks?: {
+      onThought?: (thought: string) => void;
+      onAction?: (action: string) => void;
+      onObservation?: (obs: string) => void;
+      onChunk?: (chunk: string) => void;
+      onStatus?: (msg: string) => void;
+      onToolUse?: (tool: string, params: any) => void;
+      onArtifact?: (artifact: Artifact) => void;
+    }
+  ): Promise<{
+    response: string;
+    artifacts: Artifact[];
+    phase: 'discovery' | 'execution' | 'delivery';
+    activeProject?: import('./types').ActiveProject;
+    suggestedWorkflows?: WorkflowTemplate[];
+    turnsUsed: number;
+    toolsUsed: string[];
+    thinkingTokens: number;
+  }> {
+    let turn = 0;
+    const maxTurns = 5; // Max turns for conversational response
+    const toolsUsed = new Set<string>();
+    let totalThinkingTokens = 0;
+    const artifacts: Artifact[] = [];
+    let finalResponse = '';
+    let suggestedWorkflows: WorkflowTemplate[] | undefined;
+
+    try {
+      await this.saveMessage('user', userMessage);
+      
+      const context = await this.getConversationContext();
+      const files = await this.gemini.listFiles();
+
+      // Main conversation loop
+      while (turn < maxTurns) {
+        turn++;
+        this.metrics.totalTurns++;
+        
+        callbacks?.onStatus?.(`Processing (turn ${turn}/${maxTurns})...`);
+
+        // Build conversational prompt with context
+        const userPrompt = await this.buildContextualPrompt(userMessage, context, files.length);
+        
+        // Get conversation history
+        const history = this.formatContextForGemini(this.storage.getMessages().slice(-10));
+        
+        const messages = [
+          { role: 'system', content: this.systemInstruction },
+          ...history,
+          { role: 'user', content: userPrompt },
+        ];
+
+        // Call Gemini with native tools + streaming
+        const response = await this.gemini.generateWithNativeTools(
+          messages,
+          {
+            stream: true,
+            temperature: 0.8,
+            thinkingConfig: { thinkingBudget: 8192, includeThoughts: true },
+            useSearch: true,
+            useMaps: false,
+            useCodeExecution: true,
+            useFileSearch: files.length > 0,
+            images: turn === 1 ? images : undefined,
+            files: files.length > 0 ? files : undefined,
+            maxOutputTokens: 8192,
+          },
+          callbacks?.onChunk,
+          callbacks?.onThought
+        );
+
+        // Track usage
+        if (response.usageMetadata) {
+          totalThinkingTokens += response.usageMetadata.totalTokens || 0;
+          this.metrics.thinkingTokensUsed += response.usageMetadata.totalTokens || 0;
+        }
+        
+        if (response.searchResults) {
+          this.metrics.nativeToolCalls++;
+          toolsUsed.add('google_search');
+          callbacks?.onToolUse?.('google_search', { results: response.searchResults.length });
+        }
+        
+        if (response.codeExecutionResults) {
+          this.metrics.nativeToolCalls++;
+          toolsUsed.add('code_execution');
+          callbacks?.onToolUse?.('code_execution', { executed: response.codeExecutionResults.length });
+        }
+
+        // Parse response for XML tools and narrative
+        const parsed = ToolParser.parse(response.text);
+        
+        // Stream narrative
+        if (parsed.narrative.thought) {
+          callbacks?.onThought?.(parsed.narrative.thought);
+        }
+        if (parsed.narrative.action) {
+          callbacks?.onAction?.(parsed.narrative.action);
+        }
+        if (parsed.narrative.observation) {
+          callbacks?.onObservation?.(parsed.narrative.observation);
+        }
+
+        await this.saveMessage('model', response.text);
+
+        // Execute tool calls
+        const toolResult = await this.executeToolCalls(parsed, context, callbacks);
+        
+        if (toolResult.finalResponse) {
+          finalResponse = toolResult.finalResponse;
+          break;
+        }
+        
+        if (toolResult.workflowSuggested && toolResult.workflows) {
+          suggestedWorkflows = toolResult.workflows;
+        }
+        
+        toolResult.toolsUsed.forEach(t => toolsUsed.add(t));
+        if (toolResult.artifacts) {
+          artifacts.push(...toolResult.artifacts);
+        }
+      }
+
+      // Sync to D1
+      if (this.d1 && this.sessionId) {
+        this.syncToD1().catch(() => {});
+      }
+
+      const updatedContext = await this.getConversationContext();
 
       return {
-        objective,
-        projectId,
-        workflowId,
-        createdAt,
-        updatedAt,
-        steps,
+        response: finalResponse || 'Processing complete',
+        artifacts,
+        phase: updatedContext.conversationPhase,
+        activeProject: updatedContext.activeProject,
+        suggestedWorkflows,
+        turnsUsed: turn,
+        toolsUsed: Array.from(toolsUsed),
+        thinkingTokens: totalThinkingTokens,
       };
-    } catch (e) {
-      console.error('[WorkflowManager] Failed to parse todo.md:', e);
-      return null;
+
+    } catch (error) {
+      console.error('[Agent] ❌ Conversation loop error:', error);
+      
+      return {
+        response: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        artifacts,
+        phase: 'discovery',
+        turnsUsed: turn,
+        toolsUsed: Array.from(toolsUsed),
+        thinkingTokens: totalThinkingTokens,
+      };
     }
   }
 
-  private generateReadme(projectId: string, objective: string, template: WorkflowTemplate): string {
-    return `# ${objective}
+  // =============================================================
+  // Step Execution (For Active Projects)
+  // =============================================================
 
-**Project ID**: \`${projectId}\`
-**Workflow Template**: ${template.title}
+  private async executeStepExecution(
+    projectPath: string,
+    stepNumber: number,
+    callbacks?: {
+      onThought?: (thought: string) => void;
+      onAction?: (action: string) => void;
+      onObservation?: (obs: string) => void;
+      onChunk?: (chunk: string) => void;
+      onStatus?: (msg: string) => void;
+      onToolUse?: (tool: string, params: any) => void;
+      onArtifact?: (artifact: Artifact) => void;
+    }
+  ): Promise<StepExecutionResult> {
+    if (!this.workflow) {
+      throw new Error('Workflow manager not initialized');
+    }
 
-## Overview
-${template.description}
+    const todo = await this.workflow.loadTodoDocument(projectPath);
+    if (!todo) {
+      throw new Error('Todo document not found');
+    }
 
-## Project Structure
+    const step = todo.steps.find(s => s.number === stepNumber);
+    if (!step) {
+      throw new Error(`Step ${stepNumber} not found`);
+    }
 
-- \`todo.md\` - Step-by-step plan and progress tracker
-- \`data/\` - Raw data, research, intermediate files
-- \`results/\` - Final deliverables
-- \`artifacts/\` - Code, visualizations, tools
+    await this.workflow.updateStepStatus(projectPath, stepNumber, 'in_progress');
 
-## Workflow Steps
+    const maxTurns = 5;
+    let turn = 0;
+    const toolsUsed = new Set<string>();
+    const artifacts: Artifact[] = [];
+    let stepResponse = '';
 
-${template.steps.map(s => `${s.number}. ${s.title}`).join('\n')}
+    try {
+      callbacks?.onStatus?.(`Executing Step ${stepNumber}: ${step.title}`);
 
-## Progress
+      const stepPrompt = this.buildStepPrompt(todo, step, projectPath);
+      
+      while (turn < maxTurns) {
+        turn++;
+        
+        callbacks?.onStatus?.(`Step ${stepNumber} - Turn ${turn}/${maxTurns}`);
 
-See \`todo.md\` for current progress and step details.
+        const history = this.formatContextForGemini(this.storage.getMessages().slice(-5));
+        
+        const messages = [
+          { role: 'system', content: this.systemInstruction },
+          ...history,
+          { role: 'user', content: stepPrompt },
+        ];
 
----
-*Generated by ORION AI-Collaborator*
-`;
+        const response = await this.gemini.generateWithNativeTools(
+          messages,
+          {
+            stream: true,
+            temperature: 0.7,
+            thinkingConfig: { thinkingBudget: 4096, includeThoughts: true },
+            useSearch: true,
+            useCodeExecution: true,
+            maxOutputTokens: 4096,
+          },
+          callbacks?.onChunk,
+          callbacks?.onThought
+        );
+
+        if (response.searchResults) toolsUsed.add('google_search');
+        if (response.codeExecutionResults) toolsUsed.add('code_execution');
+
+        const parsed = ToolParser.parse(response.text);
+        
+        if (parsed.narrative.observation) {
+          callbacks?.onObservation?.(parsed.narrative.observation);
+        }
+
+        await this.saveMessage('model', response.text);
+
+        // Execute tools
+        const context = await this.getConversationContext();
+        const toolResult = await this.executeToolCalls(parsed, context, callbacks);
+        
+        if (toolResult.finalResponse) {
+          stepResponse = toolResult.finalResponse;
+          break;
+        }
+        
+        toolResult.toolsUsed.forEach(t => toolsUsed.add(t));
+        if (toolResult.artifacts) {
+          artifacts.push(...toolResult.artifacts);
+        }
+      }
+
+      // Mark step complete
+      await this.workflow.updateStepStatus(
+        projectPath,
+        stepNumber,
+        'completed',
+        `Completed in ${turn} turns`
+      );
+      
+      this.metrics.stepsCompleted++;
+
+      const nextStep = todo.steps.find(s => s.number === stepNumber + 1 && s.status === 'pending');
+
+      return {
+        stepNumber,
+        stepTitle: step.title,
+        status: 'completed',
+        response: stepResponse || `Step ${stepNumber} completed successfully`,
+        outputs: step.outputs,
+        artifacts,
+        nextStepReady: !!nextStep,
+        turnsUsed: turn,
+      };
+
+    } catch (error) {
+      await this.workflow.updateStepStatus(
+        projectPath,
+        stepNumber,
+        'pending', // Reset to pending on failure
+        `Failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+
+      throw error;
+    }
+  }
+
+  // =============================================================
+  // Tool Execution
+  // =============================================================
+
+  private async executeToolCalls(
+    parsed: ParsedResponse,
+    context: ConversationContext,
+    callbacks?: {
+      onToolUse?: (tool: string, params: any) => void;
+      onArtifact?: (artifact: Artifact) => void;
+    }
+  ): Promise<{
+    finalResponse?: string;
+    workflows?: WorkflowTemplate[];
+    workflowSuggested?: boolean;
+    toolsUsed: string[];
+    artifacts?: Artifact[];
+  }> {
+    const result: any = {
+      toolsUsed: [],
+      artifacts: [],
+    };
+
+    for (const toolCall of parsed.toolCalls) {
+      switch (toolCall.type) {
+        case 'response':
+          result.finalResponse = toolCall.content;
+          return result;
+
+        case 'ask_user':
+          result.finalResponse = toolCall.content;
+          return result;
+
+        case 'file_tool':
+          if (Workspace.isInitialized()) {
+            await this.executeFileTool(toolCall);
+            result.toolsUsed.push('file_tool');
+            callbacks?.onToolUse?.('file_tool', { action: toolCall.action });
+          }
+          break;
+
+        case 'workflow_tool':
+          await this.executeWorkflowTool(toolCall, result, callbacks);
+          result.toolsUsed.push('workflow_tool');
+          break;
+      }
+    }
+
+    return result;
+  }
+
+  private async executeFileTool(toolCall: Extract<import('./tools/tool-parser').ToolCall, { type: 'file_tool' }>): Promise<void> {
+    const { action, path, content } = toolCall;
+
+    try {
+      switch (action) {
+        case 'read':
+          await Workspace.readFileText(path);
+          break;
+        case 'write':
+          if (!content) throw new Error('Content required for write');
+          await Workspace.writeFile(path, content);
+          break;
+        case 'append':
+          if (!content) throw new Error('Content required for append');
+          await Workspace.appendFile(path, content);
+          break;
+        case 'delete':
+          await Workspace.unlink(path);
+          break;
+        case 'list':
+          await Workspace.readdir(path);
+          break;
+        case 'mkdir':
+          await Workspace.mkdir(path);
+          break;
+      }
+    } catch (e) {
+      console.error('[Agent] File operation failed:', e);
+      throw e;
+    }
+  }
+
+  private async executeWorkflowTool(
+    toolCall: Extract<import('./tools/tool-parser').ToolCall, { type: 'workflow_tool' }>,
+    result: any,
+    callbacks?: {
+      onToolUse?: (tool: string, params: any) => void;
+    }
+  ): Promise<void> {
+    if (!this.workflow) {
+      throw new Error('Workflow manager not initialized');
+    }
+
+    const { action, query, workflowId, projectPath, stepNumber, adaptations } = toolCall;
+
+    try {
+      switch (action) {
+        case 'search':
+          if (!query) throw new Error('Query required for search');
+          const workflows = await this.workflow.searchTemplates(query, 3);
+          result.workflows = workflows;
+          result.workflowSuggested = true;
+          callbacks?.onToolUse?.('workflow_search', { query, found: workflows.length });
+          break;
+
+        case 'get':
+          if (!workflowId) throw new Error('Workflow ID required for get');
+          const template = await this.workflow.getTemplate(workflowId);
+          result.workflows = template ? [template] : [];
+          callbacks?.onToolUse?.('workflow_get', { workflowId });
+          break;
+
+        case 'create_project':
+          if (!workflowId) throw new Error('Workflow ID required for create_project');
+          const objective = query || 'New Project';
+          const project = await this.workflow.createProjectFromTemplate(
+            workflowId,
+            objective,
+            adaptations
+          );
+          result.finalResponse = `Project created: ${project.projectId} at ${project.projectPath}`;
+          callbacks?.onToolUse?.('project_created', project);
+          break;
+
+        case 'load_step':
+          if (!projectPath) throw new Error('Project path required for load_step');
+          const todo = await this.workflow.loadTodoDocument(projectPath);
+          if (!todo) throw new Error('Todo document not found');
+          
+          const step = stepNumber 
+            ? todo.steps.find(s => s.number === stepNumber)
+            : this.workflow.getCurrentStep(todo);
+          
+          if (!step) throw new Error('No step found');
+          callbacks?.onToolUse?.('step_loaded', { stepNumber: step.number, title: step.title });
+          break;
+
+        default:
+          throw new Error(`Unknown workflow action: ${action}`);
+      }
+    } catch (e) {
+      console.error('[Agent] Workflow operation failed:', e);
+      throw e;
+    }
+  }
+
+  // =============================================================
+  // Context Building
+  // =============================================================
+
+  private async getConversationContext(): Promise<ConversationContext> {
+    const context: ConversationContext = {
+      sessionId: this.sessionId || '',
+      recentTools: [],
+      conversationPhase: 'discovery',
+    };
+
+    // Check for active project
+    if (this.sessionId && Workspace.isInitialized() && this.workflow) {
+      try {
+        const items = await Workspace.readdir(this.sessionId);
+        const projectDirs = items.filter(i => i.startsWith('project_'));
+        
+        if (projectDirs.length > 0) {
+          // Find most recently updated project
+          let latestProject: string | null = null;
+          let latestTime = 0;
+
+          for (const projectDir of projectDirs) {
+            const projectPath = `${this.sessionId}/${projectDir}`;
+            const todo = await this.workflow.loadTodoDocument(projectPath);
+            
+            if (todo && todo.updatedAt > latestTime) {
+              latestTime = todo.updatedAt;
+              latestProject = projectDir;
+            }
+          }
+
+          if (latestProject) {
+            const projectPath = `${this.sessionId}/${latestProject}`;
+            const todo = await this.workflow.loadTodoDocument(projectPath);
+            
+            if (todo) {
+              const progress = this.workflow.getProgress(todo);
+              const currentStep = this.workflow.getCurrentStep(todo);
+
+              context.activeProject = {
+                projectId: latestProject,
+                projectPath,
+                workflowId: todo.workflowId,
+                currentStep: currentStep?.number,
+                totalSteps: progress.total,
+                createdAt: todo.createdAt,
+                updatedAt: todo.updatedAt,
+              };
+
+              // Determine phase
+              if (progress.completed === 0) {
+                context.conversationPhase = 'discovery';
+              } else if (progress.completed === progress.total) {
+                context.conversationPhase = 'delivery';
+              } else {
+                context.conversationPhase = 'execution';
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[Agent] Failed to get active project:', e);
+      }
+    }
+
+    return context;
+  }
+
+  private async buildContextualPrompt(
+    userMessage: string,
+    context: ConversationContext,
+    fileCount: number
+  ): string {
+    const parts: string[] = [];
+
+    parts.push(`<user_message>${userMessage}</user_message>`);
+
+    if (fileCount > 0) {
+      parts.push(`<files_available>${fileCount} uploaded documents available</files_available>`);
+    }
+
+    if (context.activeProject) {
+      parts.push(`<active_project>`);
+      parts.push(`Project: ${context.activeProject.projectId}`);
+      parts.push(`Path: ${context.activeProject.projectPath}`);
+      if (context.activeProject.workflowId) {
+        parts.push(`Workflow: ${context.activeProject.workflowId}`);
+      }
+      if (context.activeProject.currentStep) {
+        parts.push(`Current Step: ${context.activeProject.currentStep}/${context.activeProject.totalSteps}`);
+      }
+      parts.push(`</active_project>`);
+
+      // Load current todo if available
+      if (this.workflow) {
+        try {
+          const todo = await this.workflow.loadTodoDocument(context.activeProject.projectPath);
+          if (todo) {
+            const currentStep = this.workflow.getCurrentStep(todo);
+            if (currentStep) {
+              parts.push(`<current_step>`);
+              parts.push(`Step ${currentStep.number}: ${currentStep.title}`);
+              parts.push(`Status: ${currentStep.status}`);
+              parts.push(`Description: ${currentStep.description}`);
+              parts.push(`</current_step>`);
+            }
+          }
+        } catch (e) {
+          console.warn('[Agent] Failed to load todo context:', e);
+        }
+      }
+    }
+
+    parts.push(`<conversation_phase>${context.conversationPhase}</conversation_phase>`);
+
+    return parts.join('\n');
+  }
+
+  private buildStepPrompt(todo: TodoDocument, step: import('./types').TodoStep, projectPath: string): string {
+    return `<step_execution>
+<objective>${todo.objective}</objective>
+
+<current_step>
+Step ${step.number}: ${step.title}
+${step.description}
+</current_step>
+
+<expected_outputs>
+${step.outputs.join(', ')}
+</expected_outputs>
+
+<project_path>${projectPath}</project_path>
+
+<instructions>
+Execute this step of the workflow. You have up to 5 turns.
+
+1. Understand the step requirements
+2. Use tools as needed (search, code, files)
+3. Save outputs to workspace files
+4. Summarize what was accomplished
+
+Save outputs to appropriate folders:
+- Research/data → data/
+- Final deliverables → results/
+- Code/tools → artifacts/
+
+When complete, use <response> to summarize the step results.
+</instructions>
+</step_execution>`;
+  }
+
+  // =============================================================
+  // Helper Methods
+  // =============================================================
+
+  private formatContextForGemini(
+    messages: Message[]
+  ): Array<{ role: string; content: string }> {
+    return messages.map(msg => ({
+      role: msg.role === 'model' ? 'assistant' : 'user',
+      content: this.extractMessageContent(msg),
+    }));
+  }
+
+  private extractMessageContent(msg: Message): string {
+    if ((msg as any).content) return (msg as any).content;
+    if ((msg as any).parts) {
+      return (msg as any).parts
+        .map((p: any) => p.text || '')
+        .filter(Boolean)
+        .join('\n');
+    }
+    return '';
+  }
+
+  private async saveMessage(role: 'user' | 'model', content: string): Promise<void> {
+    await this.storage.saveMessage(role, [{ text: content }], Date.now());
+  }
+
+  private async syncToD1(): Promise<void> {
+    if (!this.d1 || !this.sessionId) return;
+    
+    try {
+      const messages = this.storage.getMessages();
+      if (messages.length === 0) return;
+      
+      const latestInD1 = await this.d1.getLatestMessageTimestamp(this.sessionId);
+      const newMessages = messages.filter(m => (m.timestamp || 0) > latestInD1);
+      
+      if (newMessages.length > 0) {
+        await this.d1.saveMessages(this.sessionId, newMessages);
+      }
+      
+      const artifacts = this.storage.getArtifacts();
+      for (const artifact of artifacts) {
+        await this.d1.saveArtifact(this.sessionId, artifact);
+      }
+    } catch (err) {
+      console.error('[Agent] D1 sync failed:', err);
+    }
   }
 }
 
-export default WorkflowManager;
+export default OrionAgent;
