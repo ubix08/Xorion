@@ -1,4 +1,4 @@
-// src/types.ts - Refactored Types (Workflow-Based)
+// src/types.ts - Complete Type Definitions
 
 import type { DurableObjectNamespace, D1Database, VectorizeIndex } from '@cloudflare/workers-types';
 
@@ -15,7 +15,6 @@ export interface Env {
   ADMIN_GMAIL?: string;
   ADMIN_PASSWORD_HASH?: string;
   
-  // B2 Workspace Configuration
   B2_KEY_ID?: string;
   B2_APPLICATION_KEY?: string;
   B2_S3_ENDPOINT?: string;
@@ -24,7 +23,21 @@ export interface Env {
 }
 
 // =============================================================
-// Conversation Context (Replaces State Machine)
+// Agent State
+// =============================================================
+
+export interface AgentState {
+  sessionId: string;
+  conversationHistory: Message[];
+  context: {
+    files: FileMetadata[];
+    searchResults: any[];
+  };
+  lastActivityAt: number;
+}
+
+// =============================================================
+// Conversation Context
 // =============================================================
 
 export interface ConversationContext {
@@ -226,6 +239,7 @@ export interface Artifact {
   projectId?: string;
   stepNumber?: number;
   createdAt: number;
+  workerType?: string;
   metadata?: {
     format?: string;
     language?: string;
