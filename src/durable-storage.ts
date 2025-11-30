@@ -1,4 +1,4 @@
-// src/durable-storage.ts - Durable Object Storage Layer
+// src/durable-storage.ts - Durable Object Storage Layer (Fixed)
 
 import type { DurableObjectState } from '@cloudflare/workers-types';
 import type { AgentState, Message, MessagePart } from './types';
@@ -23,20 +23,20 @@ export class DurableStorage {
   private state: DurableObjectState;
   private sql: SqlStorage | null;
   private maxMessages: number;
+  private schemaInitialized = false;
 
   constructor(state: DurableObjectState, maxMessages = 200) {
     this.state = state;
     this.maxMessages = maxMessages;
     this.sql = (state.storage as unknown as { sql?: SqlStorage }).sql ?? null;
-    this.initializeSchema();
   }
 
   // -----------------------------------------------------------
-  // Schema Initialization
+  // Schema Initialization (Fixed - Now Async)
   // -----------------------------------------------------------
 
-  private initializeSchema(): void {
-    if (!this.sql) return;
+  private async ensureSchema(): Promise<void> {
+    if (this.schemaInitialized || !this.sql) return;
 
     try {
       // Messages table
@@ -76,8 +76,10 @@ export class DurableStorage {
       this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_msg_ts ON messages(timestamp)`);
       this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_artifact_type ON artifacts(type)`);
 
+      this.schemaInitialized = true;
     } catch (e) {
       console.error('[Storage] Schema init failed:', e);
+      throw e;
     }
   }
 
@@ -91,6 +93,8 @@ export class DurableStorage {
     timestamp?: number,
     metadata?: Record<string, unknown>
   ): Promise<void> {
+    await this.ensureSchema();
+
     if (!this.sql) {
       console.warn('[Storage] SQL not available');
       return;
@@ -118,7 +122,7 @@ export class DurableStorage {
   }
 
   getMessages(limit?: number): Message[] {
-    if (!this.sql) return [];
+    if (!this.sql || !this.schemaInitialized) return [];
 
     try {
       const actualLimit = Math.min(limit ?? this.maxMessages, this.maxMessages);
@@ -149,7 +153,7 @@ export class DurableStorage {
         }
       }
 
-      // Remove consecutive duplicate user messages
+      // Remove duplicate messages (improved algorithm)
       return this.deduplicateMessages(messages);
     } catch (e) {
       console.error('[Storage] Get messages failed:', e);
@@ -162,13 +166,31 @@ export class DurableStorage {
 
     for (const msg of messages) {
       const last = result[result.length - 1];
-      if (last && last.role === 'user' && msg.role === 'user') {
-        continue; // Skip consecutive user messages
+
+      // Skip if same role AND same content
+      if (last && last.role === msg.role) {
+        const lastContent = this.extractMessageContent(last);
+        const msgContent = this.extractMessageContent(msg);
+
+        if (lastContent === msgContent) {
+          continue;
+        }
       }
+
       result.push(msg);
     }
 
     return result;
+  }
+
+  private extractMessageContent(msg: Message): string {
+    if (msg.parts) {
+      return msg.parts
+        .map(p => p.text || '')
+        .filter(Boolean)
+        .join('\n');
+    }
+    return (msg as any).content || '';
   }
 
   private async pruneMessages(): Promise<void> {
@@ -179,7 +201,6 @@ export class DurableStorage {
       const count = countRow?.count || 0;
 
       if (count > this.maxMessages * 1.5) {
-        // Delete oldest messages beyond limit
         const toDelete = count - this.maxMessages;
         this.sql.exec(
           `DELETE FROM messages WHERE id IN (
@@ -195,6 +216,8 @@ export class DurableStorage {
   }
 
   async clearMessages(): Promise<void> {
+    await this.ensureSchema();
+
     if (!this.sql) return;
 
     try {
@@ -211,6 +234,8 @@ export class DurableStorage {
   // -----------------------------------------------------------
 
   async loadState(): Promise<AgentState> {
+    await this.ensureSchema();
+
     let state: AgentState | null = null;
 
     if (this.sql) {
@@ -227,7 +252,6 @@ export class DurableStorage {
       }
     }
 
-    // Return default state if none found
     if (!state || !state.sessionId) {
       state = {
         sessionId: this.state.id?.toString() ?? `session_${Date.now()}`,
@@ -244,6 +268,8 @@ export class DurableStorage {
   }
 
   async saveState(state: AgentState): Promise<void> {
+    await this.ensureSchema();
+
     if (!this.sql) return;
 
     try {
@@ -264,6 +290,8 @@ export class DurableStorage {
   }
 
   async clearState(): Promise<void> {
+    await this.ensureSchema();
+
     if (!this.sql) return;
 
     try {
@@ -287,6 +315,8 @@ export class DurableStorage {
     createdAt: number;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
+    await this.ensureSchema();
+
     if (!this.sql) return;
 
     try {
@@ -311,13 +341,13 @@ export class DurableStorage {
   }
 
   getArtifacts(type?: string): any[] {
-    if (!this.sql) return [];
+    if (!this.sql || !this.schemaInitialized) return [];
 
     try {
       const query = type
         ? `SELECT * FROM artifacts WHERE type = ? ORDER BY created_at DESC`
         : `SELECT * FROM artifacts ORDER BY created_at DESC`;
-      
+
       const rows = type
         ? this.sql.exec(query, type).toArray()
         : this.sql.exec(query).toArray();
@@ -375,6 +405,8 @@ export class DurableStorage {
   // -----------------------------------------------------------
 
   async clearAll(): Promise<void> {
+    await this.ensureSchema();
+
     if (!this.sql) return;
 
     try {
@@ -399,33 +431,40 @@ export class DurableStorage {
     messageCount: number;
     artifactCount: number;
   } {
+    if (!this.sql || !this.schemaInitialized) {
+      return {
+        sessionId: null,
+        lastActivity: null,
+        messageCount: 0,
+        artifactCount: 0,
+      };
+    }
+
     let sessionId: string | null = null;
     let lastActivity: number | null = null;
     let messageCount = 0;
     let artifactCount = 0;
 
-    if (this.sql) {
-      try {
-        // Get state info
-        const stateRows = this.sql
-          .exec(`SELECT value FROM kv WHERE key = ?`, 'agent_state')
-          .toArray();
+    try {
+      // Get state info
+      const stateRows = this.sql
+        .exec(`SELECT value FROM kv WHERE key = ?`, 'agent_state')
+        .toArray();
 
-        if (stateRows.length === 1) {
-          const state = JSON.parse(stateRows[0].value as string);
-          sessionId = state?.sessionId ?? null;
-          lastActivity = state?.lastActivityAt ?? null;
-        }
-
-        // Get counts
-        const msgCount = this.sql.exec(`SELECT COUNT(*) as count FROM messages`).one();
-        messageCount = msgCount?.count ?? 0;
-
-        const artCount = this.sql.exec(`SELECT COUNT(*) as count FROM artifacts`).one();
-        artifactCount = artCount?.count ?? 0;
-      } catch (e) {
-        console.error('[Storage] Get status failed:', e);
+      if (stateRows.length === 1) {
+        const state = JSON.parse(stateRows[0].value as string);
+        sessionId = state?.sessionId ?? null;
+        lastActivity = state?.lastActivityAt ?? null;
       }
+
+      // Get counts
+      const msgCount = this.sql.exec(`SELECT COUNT(*) as count FROM messages`).one();
+      messageCount = msgCount?.count ?? 0;
+
+      const artCount = this.sql.exec(`SELECT COUNT(*) as count FROM artifacts`).one();
+      artifactCount = artCount?.count ?? 0;
+    } catch (e) {
+      console.error('[Storage] Get status failed:', e);
     }
 
     return { sessionId, lastActivity, messageCount, artifactCount };
