@@ -1,4 +1,4 @@
-// src/gemini.ts - Gemini Client with Full Native Capabilities and Real-Time Streaming
+// src/gemini.ts - Gemini Client with Full Native Capabilities (Fixed)
 
 import { GoogleGenAI } from '@google/genai';
 import type { FileMetadata } from './types';
@@ -12,37 +12,30 @@ export interface GenerateOptions {
   stream?: boolean;
   timeoutMs?: number;
   
-  // Thinking configuration
   thinkingConfig?: {
     thinkingBudget?: number;
     includeThoughts?: boolean;
   };
   
-  // Generation parameters
   temperature?: number;
   topP?: number;
   topK?: number;
   maxOutputTokens?: number;
   
-  // Native Gemini tools
   useSearch?: boolean;
   useMaps?: boolean;
   useCodeExecution?: boolean;
-  useUrlContext?: string[];  // Array of URLs to ground with
+  useUrlContext?: string[];
   useFileSearch?: boolean;
   
-  // Files and media
   files?: FileMetadata[];
   images?: Array<{ data: string; mimeType: string }>;
   
-  // External tools (function calling)
   tools?: ToolDefinition[];
   
-  // Response format
   responseMimeType?: 'text/plain' | 'application/json';
   responseSchema?: Record<string, any>;
   
-  // Safety settings
   safetySettings?: Array<{
     category: string;
     threshold: string;
@@ -82,7 +75,7 @@ export class GeminiClient {
   
   private readonly maxRetries = 3;
   private readonly baseBackoff = 1000;
-  private readonly defaultTimeout = 120000; // 2 minutes for complex queries
+  private readonly defaultTimeout = 120000;
   private readonly defaultEmbedModel = 'text-embedding-004';
 
   constructor(opts?: { apiKey?: string }) {
@@ -102,20 +95,31 @@ export class GeminiClient {
   ): Promise<GenerateResponse> {
     return this.withRetry(async () => {
       const model = options.model ?? 'gemini-2.5-flash';
-
-      // Format messages with content types
       const contents = await this.formatMessages(conversationHistory, options);
-
-      // Build comprehensive config
       const config = this.buildConfig(options);
 
-      // Execute with streaming support
       if (options.stream) {
         return await this.streamGenerate(model, contents, config, options.timeoutMs, onChunk, onThinking);
       } else {
         return await this.generate(model, contents, config, options.timeoutMs);
       }
     });
+  }
+
+  // Alias for backward compatibility
+  async generateWithTools(
+    conversationHistory: Array<{ role: string; content: string; files?: FileMetadata[] }>,
+    tools: ToolDefinition[],
+    options: GenerateOptions = {},
+    onChunk?: (chunk: string) => void,
+    onThinking?: (thought: string) => void
+  ): Promise<GenerateResponse> {
+    return this.generateWithNativeTools(
+      conversationHistory,
+      { ...options, tools },
+      onChunk,
+      onThinking
+    );
   }
 
   private async generate(
@@ -158,23 +162,21 @@ export class GeminiClient {
     try {
       if (streamResp && typeof streamResp[Symbol.asyncIterator] === 'function') {
         for await (const chunk of streamResp) {
-          // Extract and stream text content in real-time
+          // Extract and stream text content
           const text = chunk?.text ?? chunk?.delta ?? '';
           if (text) {
             fullText += text;
-            // ✅ Stream chunks immediately to frontend
             if (onChunk) {
               onChunk(text);
             }
           }
 
-          // Extract and stream thinking content (new in Gemini 2.5)
+          // Extract and stream thinking content
           if (chunk?.candidates?.[0]?.content?.parts) {
             for (const part of chunk.candidates[0].content.parts) {
               if (part.thought) {
                 const thoughtChunk = part.thought;
                 thinking += thoughtChunk;
-                // ✅ Stream thinking immediately to frontend
                 if (onThinking) {
                   onThinking(thoughtChunk);
                 }
@@ -211,7 +213,6 @@ export class GeminiClient {
             }
           }
 
-          // Capture metadata from final chunk
           if (chunk?.usageMetadata) {
             usageMetadata = chunk.usageMetadata;
           }
@@ -249,7 +250,6 @@ export class GeminiClient {
     for (const msg of history) {
       const parts: any[] = [];
 
-      // Handle system messages
       if (msg.role === 'system') {
         contents.push({
           role: 'user',
@@ -258,12 +258,10 @@ export class GeminiClient {
         continue;
       }
 
-      // Add text content
       if (msg.content) {
         parts.push({ text: msg.content });
       }
 
-      // Add file attachments (documents, images, etc.)
       if (msg.files) {
         for (const file of msg.files) {
           parts.push({
@@ -275,7 +273,6 @@ export class GeminiClient {
         }
       }
 
-      // Add images from options (only for current message)
       if (options.images && contents.length === history.length - 1) {
         for (const img of options.images) {
           parts.push({
@@ -302,45 +299,36 @@ export class GeminiClient {
 
   private buildConfig(options: GenerateOptions): any {
     const config: any = {
-      // Thinking configuration (Gemini 2.5 feature)
       thinkingConfig: options.thinkingConfig ?? {
-        thinkingBudget: 8192, // Max thinking tokens
+        thinkingBudget: 8192,
         includeThoughts: true,
       },
       
-      // Generation parameters
       temperature: options.temperature ?? 0.7,
       topP: options.topP,
       topK: options.topK,
       maxOutputTokens: options.maxOutputTokens,
       
-      // Response format
       responseMimeType: options.responseMimeType,
       responseSchema: options.responseSchema,
       
-      // Safety settings
       safetySettings: options.safetySettings,
     };
 
-    // Build tools array
     const tools: any[] = [];
 
-    // Google Search grounding
     if (options.useSearch) {
       tools.push({ googleSearch: {} });
     }
 
-    // Maps grounding
     if (options.useMaps) {
       tools.push({ googleMaps: {} });
     }
 
-    // Code execution
     if (options.useCodeExecution) {
       tools.push({ codeExecution: {} });
     }
 
-    // URL context grounding
     if (options.useUrlContext && options.useUrlContext.length > 0) {
       tools.push({
         urlContext: {
@@ -349,12 +337,10 @@ export class GeminiClient {
       });
     }
 
-    // File search (RAG over uploaded files)
     if (options.useFileSearch) {
       tools.push({ fileSearch: {} });
     }
 
-    // External function calling tools
     if (options.tools && options.tools.length > 0) {
       tools.push({
         functionDeclarations: options.tools.map(t => ({
@@ -372,6 +358,9 @@ export class GeminiClient {
     return config;
   }
 
+  // Continued in Part 2...
+// src/gemini.ts - Part 2: File Upload, Embeddings, Utilities
+
   // -----------------------------------------------------------
   // Response Parsing
   // -----------------------------------------------------------
@@ -382,19 +371,16 @@ export class GeminiClient {
     if (response?.candidates?.[0]?.content?.parts) {
       const parts = response.candidates[0].content.parts;
 
-      // Extract text
       result.text = parts
         .filter((p: any) => p.text)
         .map((p: any) => p.text)
         .join('');
 
-      // Extract thinking/thoughts
       const thoughts = parts.filter((p: any) => p.thought);
       if (thoughts.length > 0) {
         result.thinking = thoughts.map((t: any) => t.thought).join('\n');
       }
 
-      // Extract function calls
       const functionCalls = parts.filter((p: any) => p.functionCall);
       if (functionCalls.length > 0) {
         result.toolCalls = functionCalls.map((fc: any) => ({
@@ -403,18 +389,15 @@ export class GeminiClient {
         }));
       }
 
-      // Extract code execution results
       const codeResults = parts.filter((p: any) => p.codeExecutionResult);
       if (codeResults.length > 0) {
         result.codeExecutionResults = codeResults.map((cr: any) => cr.codeExecutionResult);
       }
 
-      // Extract grounding metadata (search results)
       if (response.candidates[0].groundingMetadata) {
         result.searchResults = [response.candidates[0].groundingMetadata];
       }
 
-      // Extract usage metadata
       if (response.usageMetadata) {
         result.usageMetadata = {
           promptTokens: response.usageMetadata.promptTokenCount,
@@ -423,7 +406,6 @@ export class GeminiClient {
         };
       }
 
-      // Extract finish reason
       if (response.candidates[0].finishReason) {
         result.finishReason = response.candidates[0].finishReason;
       }
@@ -435,7 +417,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // File Management
+  // File Management (Fixed Upload Timeout & Error Handling)
   // -----------------------------------------------------------
 
   async uploadFile(
@@ -446,26 +428,38 @@ export class GeminiClient {
     return this.withRetry(async () => {
       const buffer = Buffer.from(fileDataBase64, 'base64');
 
+      // Dynamic timeout based on file size
+      const timeoutMs = Math.max(60000, buffer.length / 1000);
+
       const uploadResp: any = await this.withTimeout(
         this.ai.files.upload({
           file: buffer as any,
           config: { mimeType, displayName },
         }),
         'Upload timeout',
-        60000
+        timeoutMs
       );
 
       const name = uploadResp?.name;
       if (!name) throw new Error('Upload failed: no file name returned');
 
-      // Wait for processing
+      // Wait for processing with better error handling
       let meta: any = await this.ai.files.get({ name });
       let attempts = 0;
-      
+
       while (meta.state === 'PROCESSING' && attempts < 30) {
         await new Promise(r => setTimeout(r, 2000));
         meta = await this.ai.files.get({ name });
         attempts++;
+      }
+
+      // Handle failed or timeout states
+      if (meta.state === 'FAILED') {
+        throw new Error(`File processing failed: ${meta.error || 'Unknown error'}`);
+      }
+
+      if (meta.state === 'PROCESSING') {
+        throw new Error('File processing timeout after 60 seconds');
       }
 
       return {
@@ -510,7 +504,7 @@ export class GeminiClient {
   }
 
   // -----------------------------------------------------------
-  // Embeddings
+  // Embeddings (Fixed Batch Size)
   // -----------------------------------------------------------
 
   async embedText(
@@ -521,7 +515,7 @@ export class GeminiClient {
 
     return this.withRetry(async () => {
       const response = await this.callEmbedApi([text], model, opts?.timeoutMs);
-      
+
       if (!response || response.length === 0) {
         throw new Error('Empty embedding response');
       }
@@ -537,12 +531,13 @@ export class GeminiClient {
     if (texts.length === 0) return [];
 
     const model = opts?.model ?? this.defaultEmbedModel;
-    const batchSize = opts?.batchSize ?? 16;
+    // Cap batch size at 10 for safety
+    const batchSize = Math.min(opts?.batchSize ?? 10, 10);
     const allEmbeddings: number[][] = [];
 
     for (let i = 0; i < texts.length; i += batchSize) {
       const batch = texts.slice(i, i + batchSize);
-      
+
       const embeddings = await this.withRetry(async () => {
         return await this.callEmbedApi(batch, model, opts?.timeoutMs);
       });
