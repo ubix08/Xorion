@@ -1,4 +1,4 @@
-// src/durable-agent.ts - Refactored AI-Collaborator Agent
+// src/durable-agent.ts - Complete Refactored AI-Collaborator Agent
 
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectState } from '@cloudflare/workers-types';
@@ -48,6 +48,9 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     thinkingTokensUsed: 0,
   };
 
+  // Cache for todo documents
+  private todoCache = new Map<string, { todo: TodoDocument; loadedAt: number }>();
+
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
     this.state = state;
@@ -62,6 +65,10 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     }
   }
 
+  // =============================================================
+  // Initialization
+  // =============================================================
+
   private async init(): Promise<void> {
     if (this.initialized) return;
     
@@ -75,17 +82,16 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           this.env.VECTORIZE,
           this.gemini,
           this.sessionId,
+          this.storage.getDurableObjectState().storage,
           {}
         );
         
-        // Initialize workflow manager with RAG
         this.workflow = new WorkflowManager(
           this.env.VECTORIZE,
           this.gemini,
           this.sessionId
         );
       } else {
-        // Workflow manager without RAG (list-based fallback)
         this.workflow = new WorkflowManager(
           null,
           this.gemini,
@@ -97,6 +103,9 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       if (this.d1 && this.storage.getMessages().length === 0) {
         await this.hydrateFromD1();
       }
+
+      // Schedule periodic D1 sync via alarm
+      await this.storage.setAlarm(Date.now() + 300000); // 5 minutes
     }
     
     this.initialized = true;
@@ -113,9 +122,27 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           msg.timestamp
         );
       }
+      console.log(`[Agent] Hydrated ${messages.length} messages from D1`);
     } catch (e) {
       console.warn('[Agent] Hydration failed:', e);
     }
+  }
+
+  // =============================================================
+  // Alarm Handler (D1 Sync)
+  // =============================================================
+
+  async alarm(): Promise<void> {
+    console.log('[Agent] ⏰ Alarm triggered - syncing to D1');
+    
+    try {
+      await this.syncToD1();
+    } catch (err) {
+      console.error('[Agent] Alarm sync failed:', err);
+    }
+    
+    // Schedule next sync (every 5 minutes)
+    await this.storage.setAlarm(Date.now() + 300000);
   }
 
   // =============================================================
@@ -179,13 +206,13 @@ export class OrionAgent extends DurableObject implements OrionRPC {
 
     try {
       const sessionPath = this.sessionId;
-      const items = await Workspace.readdir(sessionPath);
+      const listing = await Workspace.readdir(sessionPath);
       const projects: import('./types').ProjectInfo[] = [];
 
-      for (const item of items) {
+      for (const item of listing.directories) {
         if (item.startsWith('project_')) {
           const projectPath = `${sessionPath}/${item}`;
-          const todo = await this.workflow.loadTodoDocument(projectPath);
+          const todo = await this.getCachedTodo(projectPath);
           
           if (todo) {
             const progress = this.workflow.getProgress(todo);
@@ -265,6 +292,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     await this.init();
     await this.storage.clearAll();
     if (this.memory) await this.memory.clearSessionMemory();
+    this.todoCache.clear();
     return { ok: true };
   }
 
@@ -299,8 +327,8 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     if (Workspace.isInitialized()) {
       if (this.sessionId) {
         try {
-          const items = await Workspace.readdir(this.sessionId);
-          projectCount = items.filter(i => i.startsWith('project_')).length;
+          const listing = await Workspace.readdir(this.sessionId);
+          projectCount = listing.directories.filter(i => i.startsWith('project_')).length;
         } catch {}
       }
       
@@ -495,7 +523,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
   }
 
   // =============================================================
-  // Core Conversation Loop (Refactored)
+  // Core Conversation Loop (Refactored with Tool Feedback)
   // =============================================================
 
   private async executeConversationLoop(
@@ -521,7 +549,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     thinkingTokens: number;
   }> {
     let turn = 0;
-    const maxTurns = 5; // Max turns for conversational response
+    const maxTurns = 5;
     const toolsUsed = new Set<string>();
     let totalThinkingTokens = 0;
     const artifacts: Artifact[] = [];
@@ -534,17 +562,13 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       const context = await this.getConversationContext();
       const files = await this.gemini.listFiles();
 
-      // Main conversation loop
       while (turn < maxTurns) {
         turn++;
         this.metrics.totalTurns++;
         
         callbacks?.onStatus?.(`Processing (turn ${turn}/${maxTurns})...`);
 
-        // Build conversational prompt with context
         const userPrompt = await this.buildContextualPrompt(userMessage, context, files.length);
-        
-        // Get conversation history
         const history = this.formatContextForGemini(this.storage.getMessages().slice(-10));
         
         const messages = [
@@ -553,7 +577,6 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           { role: 'user', content: userPrompt },
         ];
 
-        // Call Gemini with native tools + streaming
         const response = await this.gemini.generateWithNativeTools(
           messages,
           {
@@ -572,7 +595,6 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           callbacks?.onThought
         );
 
-        // Track usage
         if (response.usageMetadata) {
           totalThinkingTokens += response.usageMetadata.totalTokens || 0;
           this.metrics.thinkingTokensUsed += response.usageMetadata.totalTokens || 0;
@@ -590,10 +612,8 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           callbacks?.onToolUse?.('code_execution', { executed: response.codeExecutionResults.length });
         }
 
-        // Parse response for XML tools and narrative
         const parsed = ToolParser.parse(response.text);
         
-        // Stream narrative
         if (parsed.narrative.thought) {
           callbacks?.onThought?.(parsed.narrative.thought);
         }
@@ -606,8 +626,13 @@ export class OrionAgent extends DurableObject implements OrionRPC {
 
         await this.saveMessage('model', response.text);
 
-        // Execute tool calls
         const toolResult = await this.executeToolCalls(parsed, context, callbacks);
+        
+        // Feed tool observations back into next turn
+        if (toolResult.observations && toolResult.observations.length > 0) {
+          const observationMsg = `<tool_results>\n${toolResult.observations.join('\n\n')}\n</tool_results>`;
+          await this.saveMessage('user', observationMsg);
+        }
         
         if (toolResult.finalResponse) {
           finalResponse = toolResult.finalResponse;
@@ -624,9 +649,13 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         }
       }
 
-      // Sync to D1
+      // Sync to D1 (via alarm for non-blocking)
       if (this.d1 && this.sessionId) {
-        this.syncToD1().catch(() => {});
+        this.state.waitUntil(
+          this.syncToD1().catch(err => {
+            console.error('[Agent] Background D1 sync failed:', err);
+          })
+        );
       }
 
       const updatedContext = await this.getConversationContext();
@@ -656,6 +685,9 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     }
   }
 
+  // Continued in next artifact...
+  // src/durable-agent.ts - Part 2: Tool Execution & Helper Methods
+
   // =============================================================
   // Step Execution (For Active Projects)
   // =============================================================
@@ -677,7 +709,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       throw new Error('Workflow manager not initialized');
     }
 
-    const todo = await this.workflow.loadTodoDocument(projectPath);
+    const todo = await this.getCachedTodo(projectPath);
     if (!todo) {
       throw new Error('Todo document not found');
     }
@@ -738,9 +770,13 @@ export class OrionAgent extends DurableObject implements OrionRPC {
 
         await this.saveMessage('model', response.text);
 
-        // Execute tools
         const context = await this.getConversationContext();
         const toolResult = await this.executeToolCalls(parsed, context, callbacks);
+        
+        if (toolResult.observations && toolResult.observations.length > 0) {
+          const observationMsg = `<tool_results>\n${toolResult.observations.join('\n\n')}\n</tool_results>`;
+          await this.saveMessage('user', observationMsg);
+        }
         
         if (toolResult.finalResponse) {
           stepResponse = toolResult.finalResponse;
@@ -753,7 +789,6 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         }
       }
 
-      // Mark step complete
       await this.workflow.updateStepStatus(
         projectPath,
         stepNumber,
@@ -761,9 +796,13 @@ export class OrionAgent extends DurableObject implements OrionRPC {
         `Completed in ${turn} turns`
       );
       
+      // Invalidate cache
+      this.todoCache.delete(projectPath);
+      
       this.metrics.stepsCompleted++;
 
-      const nextStep = todo.steps.find(s => s.number === stepNumber + 1 && s.status === 'pending');
+      const updatedTodo = await this.workflow.loadTodoDocument(projectPath);
+      const nextStep = updatedTodo?.steps.find(s => s.number === stepNumber + 1 && s.status === 'pending');
 
       return {
         stepNumber,
@@ -780,7 +819,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       await this.workflow.updateStepStatus(
         projectPath,
         stepNumber,
-        'pending', // Reset to pending on failure
+        'pending',
         `Failed: ${error instanceof Error ? error.message : String(error)}`
       );
 
@@ -789,7 +828,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
   }
 
   // =============================================================
-  // Tool Execution
+  // Tool Execution (Refactored with Observations)
   // =============================================================
 
   private async executeToolCalls(
@@ -805,10 +844,12 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     workflowSuggested?: boolean;
     toolsUsed: string[];
     artifacts?: Artifact[];
+    observations: string[];
   }> {
     const result: any = {
       toolsUsed: [],
       artifacts: [],
+      observations: [],
     };
 
     for (const toolCall of parsed.toolCalls) {
@@ -823,7 +864,8 @@ export class OrionAgent extends DurableObject implements OrionRPC {
 
         case 'file_tool':
           if (Workspace.isInitialized()) {
-            await this.executeFileTool(toolCall);
+            const observation = await this.executeFileTool(toolCall);
+            result.observations.push(observation);
             result.toolsUsed.push('file_tool');
             callbacks?.onToolUse?.('file_tool', { action: toolCall.action });
           }
@@ -839,35 +881,54 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     return result;
   }
 
-  private async executeFileTool(toolCall: Extract<import('./tools/tool-parser').ToolCall, { type: 'file_tool' }>): Promise<void> {
+  private async executeFileTool(
+    toolCall: Extract<import('./tools/tool-parser').ToolCall, { type: 'file_tool' }>
+  ): Promise<string> {
     const { action, path, content } = toolCall;
 
     try {
       switch (action) {
-        case 'read':
-          await Workspace.readFileText(path);
-          break;
-        case 'write':
+        case 'read': {
+          const fileContent = await Workspace.readFileText(path);
+          return `File "${path}" contents (${fileContent.length} chars):\n\`\`\`\n${fileContent.substring(0, 500)}${fileContent.length > 500 ? '...' : ''}\n\`\`\``;
+        }
+        
+        case 'write': {
           if (!content) throw new Error('Content required for write');
           await Workspace.writeFile(path, content);
-          break;
-        case 'append':
+          return `✅ Successfully wrote ${content.length} characters to "${path}"`;
+        }
+        
+        case 'append': {
           if (!content) throw new Error('Content required for append');
           await Workspace.appendFile(path, content);
-          break;
-        case 'delete':
+          return `✅ Successfully appended ${content.length} characters to "${path}"`;
+        }
+        
+        case 'delete': {
           await Workspace.unlink(path);
-          break;
-        case 'list':
-          await Workspace.readdir(path);
-          break;
-        case 'mkdir':
+          return `✅ Successfully deleted "${path}"`;
+        }
+        
+        case 'list': {
+          const listing = await Workspace.readdir(path);
+          const dirs = listing.directories.join(', ') || '(none)';
+          const files = listing.files.map(f => `${f.name} (${f.size} bytes)`).join(', ') || '(none)';
+          return `Directory "${path}" contents:\nDirectories: ${dirs}\nFiles: ${files}`;
+        }
+        
+        case 'mkdir': {
           await Workspace.mkdir(path);
-          break;
+          return `✅ Successfully created directory "${path}"`;
+        }
+        
+        default:
+          throw new Error(`Unknown file action: ${action}`);
       }
     } catch (e) {
-      console.error('[Agent] File operation failed:', e);
-      throw e;
+      const errorMsg = `❌ File operation failed: ${e instanceof Error ? e.message : String(e)}`;
+      console.error('[Agent]', errorMsg);
+      return errorMsg;
     }
   }
 
@@ -886,22 +947,24 @@ export class OrionAgent extends DurableObject implements OrionRPC {
 
     try {
       switch (action) {
-        case 'search':
+        case 'search': {
           if (!query) throw new Error('Query required for search');
           const workflows = await this.workflow.searchTemplates(query, 3);
           result.workflows = workflows;
           result.workflowSuggested = true;
           callbacks?.onToolUse?.('workflow_search', { query, found: workflows.length });
           break;
+        }
 
-        case 'get':
+        case 'get': {
           if (!workflowId) throw new Error('Workflow ID required for get');
           const template = await this.workflow.getTemplate(workflowId);
           result.workflows = template ? [template] : [];
           callbacks?.onToolUse?.('workflow_get', { workflowId });
           break;
+        }
 
-        case 'create_project':
+        case 'create_project': {
           if (!workflowId) throw new Error('Workflow ID required for create_project');
           const objective = query || 'New Project';
           const project = await this.workflow.createProjectFromTemplate(
@@ -909,13 +972,26 @@ export class OrionAgent extends DurableObject implements OrionRPC {
             objective,
             adaptations
           );
-          result.finalResponse = `Project created: ${project.projectId} at ${project.projectPath}`;
+          
+          // Load the first step automatically
+          const todo = await this.workflow.loadTodoDocument(project.projectPath);
+          const firstStep = todo?.steps[0];
+          
+          result.finalResponse = `✅ Project created: ${project.projectId}
+
+First step ready:
+**Step 1**: ${firstStep?.title}
+${firstStep?.description}
+
+Say "start step 1" or "execute step 1" to begin.`;
+          
           callbacks?.onToolUse?.('project_created', project);
           break;
+        }
 
-        case 'load_step':
+        case 'load_step': {
           if (!projectPath) throw new Error('Project path required for load_step');
-          const todo = await this.workflow.loadTodoDocument(projectPath);
+          const todo = await this.getCachedTodo(projectPath);
           if (!todo) throw new Error('Todo document not found');
           
           const step = stepNumber 
@@ -925,6 +1001,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
           if (!step) throw new Error('No step found');
           callbacks?.onToolUse?.('step_loaded', { stepNumber: step.number, title: step.title });
           break;
+        }
 
         default:
           throw new Error(`Unknown workflow action: ${action}`);
@@ -946,20 +1023,18 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       conversationPhase: 'discovery',
     };
 
-    // Check for active project
     if (this.sessionId && Workspace.isInitialized() && this.workflow) {
       try {
-        const items = await Workspace.readdir(this.sessionId);
-        const projectDirs = items.filter(i => i.startsWith('project_'));
+        const listing = await Workspace.readdir(this.sessionId);
+        const projectDirs = listing.directories.filter(i => i.startsWith('project_'));
         
         if (projectDirs.length > 0) {
-          // Find most recently updated project
           let latestProject: string | null = null;
           let latestTime = 0;
 
           for (const projectDir of projectDirs) {
             const projectPath = `${this.sessionId}/${projectDir}`;
-            const todo = await this.workflow.loadTodoDocument(projectPath);
+            const todo = await this.getCachedTodo(projectPath);
             
             if (todo && todo.updatedAt > latestTime) {
               latestTime = todo.updatedAt;
@@ -969,7 +1044,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
 
           if (latestProject) {
             const projectPath = `${this.sessionId}/${latestProject}`;
-            const todo = await this.workflow.loadTodoDocument(projectPath);
+            const todo = await this.getCachedTodo(projectPath);
             
             if (todo) {
               const progress = this.workflow.getProgress(todo);
@@ -985,7 +1060,6 @@ export class OrionAgent extends DurableObject implements OrionRPC {
                 updatedAt: todo.updatedAt,
               };
 
-              // Determine phase
               if (progress.completed === 0) {
                 context.conversationPhase = 'discovery';
               } else if (progress.completed === progress.total) {
@@ -1008,7 +1082,7 @@ export class OrionAgent extends DurableObject implements OrionRPC {
     userMessage: string,
     context: ConversationContext,
     fileCount: number
-  ): string {
+  ): Promise<string> {
     const parts: string[] = [];
 
     parts.push(`<user_message>${userMessage}</user_message>`);
@@ -1029,10 +1103,9 @@ export class OrionAgent extends DurableObject implements OrionRPC {
       }
       parts.push(`</active_project>`);
 
-      // Load current todo if available
       if (this.workflow) {
         try {
-          const todo = await this.workflow.loadTodoDocument(context.activeProject.projectPath);
+          const todo = await this.getCachedTodo(context.activeProject.projectPath);
           if (todo) {
             const currentStep = this.workflow.getCurrentStep(todo);
             if (currentStep) {
@@ -1115,6 +1188,21 @@ When complete, use <response> to summarize the step results.
     await this.storage.saveMessage(role, [{ text: content }], Date.now());
   }
 
+  private async getCachedTodo(projectPath: string): Promise<TodoDocument | null> {
+    const cached = this.todoCache.get(projectPath);
+    if (cached && Date.now() - cached.loadedAt < 30000) {
+      return cached.todo;
+    }
+    
+    if (!this.workflow) return null;
+    
+    const todo = await this.workflow.loadTodoDocument(projectPath);
+    if (todo) {
+      this.todoCache.set(projectPath, { todo, loadedAt: Date.now() });
+    }
+    return todo;
+  }
+
   private async syncToD1(): Promise<void> {
     if (!this.d1 || !this.sessionId) return;
     
@@ -1127,6 +1215,7 @@ When complete, use <response> to summarize the step results.
       
       if (newMessages.length > 0) {
         await this.d1.saveMessages(this.sessionId, newMessages);
+        console.log(`[Agent] ✅ Synced ${newMessages.length} messages to D1`);
       }
       
       const artifacts = this.storage.getArtifacts();
@@ -1135,6 +1224,7 @@ When complete, use <response> to summarize the step results.
       }
     } catch (err) {
       console.error('[Agent] D1 sync failed:', err);
+      throw err;
     }
   }
 }
