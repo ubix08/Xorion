@@ -359,7 +359,7 @@ export class GeminiClient {
   }
 
   // Continued in Part 2...
-// src/gemini.ts - Part 2: File Upload, Embeddings, Utilities
+  // src/gemini.ts - Part 2: File Upload, Embeddings, Utilities
 
   // -----------------------------------------------------------
   // Response Parsing
