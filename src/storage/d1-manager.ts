@@ -1,4 +1,4 @@
-// src/storage/d1-manager.ts - D1 Database Manager
+// src/storage/d1-manager.ts - D1 Database Manager (Fixed)
 
 import type { Message, Session } from '../types';
 
@@ -16,18 +16,21 @@ export class D1Manager {
   }
 
   // -----------------------------------------------------------
-  // Initialization
+  // Initialization (Fixed Race Condition)
   // -----------------------------------------------------------
 
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
+    
     if (this.initPromise) {
-      await this.initPromise;
-      return;
+      return this.initPromise;
     }
-    this.initPromise = this.initialize();
-    await this.initPromise;
-    this.initialized = true;
+    
+    this.initPromise = this.initialize().then(() => {
+      this.initialized = true;
+    });
+    
+    return this.initPromise;
   }
 
   private async initialize(): Promise<void> {
@@ -83,7 +86,7 @@ export class D1Manager {
         CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_activity_at DESC)
       `).run();
 
-      console.log('[D1] Schema initialized');
+      console.log('[D1] Schema initialized successfully');
     } catch (error) {
       console.error('[D1] Initialization failed:', error);
       this.initialized = false;
@@ -210,14 +213,8 @@ export class D1Manager {
       `).bind(sessionId, msg.role, content, ts, metadata).run();
     }
 
-    // Update message count
-    const countResult = await this.db.prepare(`
-      SELECT COUNT(*) as count FROM messages WHERE session_id = ?
-    `).bind(sessionId).first<{ count: number }>();
-
-    await this.db.prepare(`
-      UPDATE sessions SET message_count = ?, last_activity_at = ? WHERE session_id = ?
-    `).bind(countResult?.count || 0, Date.now(), sessionId).run();
+    // Update message count and activity
+    await this.updateSessionStats(sessionId);
   }
 
   async loadMessages(sessionId: string, limit = 200): Promise<Message[]> {
@@ -241,24 +238,45 @@ export class D1Manager {
     }));
   }
 
-  async getLatestMessageTimestamp(sessionId: string): Promise<number> {
+  // -----------------------------------------------------------
+  // Optimized Batch Queries
+  // -----------------------------------------------------------
+
+  async getSessionStats(sessionId: string): Promise<{
+    count: number;
+    latest: number;
+  }> {
     await this.ensureInitialized();
 
     const row = await this.db.prepare(`
-      SELECT MAX(timestamp) as latest FROM messages WHERE session_id = ?
-    `).bind(sessionId).first<{ latest: number }>();
+      SELECT COUNT(*) as count, MAX(timestamp) as latest
+      FROM messages WHERE session_id = ?
+    `).bind(sessionId).first<{ count: number; latest: number }>();
 
-    return row?.latest ?? 0;
+    return {
+      count: row?.count || 0,
+      latest: row?.latest || 0,
+    };
+  }
+
+  private async updateSessionStats(sessionId: string): Promise<void> {
+    const stats = await this.getSessionStats(sessionId);
+
+    await this.db.prepare(`
+      UPDATE sessions 
+      SET message_count = ?, last_activity_at = ? 
+      WHERE session_id = ?
+    `).bind(stats.count, Date.now(), sessionId).run();
+  }
+
+  async getLatestMessageTimestamp(sessionId: string): Promise<number> {
+    const stats = await this.getSessionStats(sessionId);
+    return stats.latest;
   }
 
   async getMessageCount(sessionId: string): Promise<number> {
-    await this.ensureInitialized();
-
-    const row = await this.db.prepare(`
-      SELECT COUNT(*) as count FROM messages WHERE session_id = ?
-    `).bind(sessionId).first<{ count: number }>();
-
-    return row?.count || 0;
+    const stats = await this.getSessionStats(sessionId);
+    return stats.count;
   }
 
   // -----------------------------------------------------------
