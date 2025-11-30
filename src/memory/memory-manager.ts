@@ -1,6 +1,7 @@
-// src/memory/memory-manager.ts - Unified Memory Management
+// src/memory/memory-manager.ts - Fixed Memory Management with Persistent Cache
 
 import type { VectorizeIndex } from '@cloudflare/workers-types';
+import type { DurableObjectStorage } from '@cloudflare/workers-types';
 import type { GeminiClient } from '../gemini';
 import type { MemoryEntry, MemorySearchResult } from '../types';
 
@@ -9,8 +10,8 @@ import type { MemoryEntry, MemorySearchResult } from '../types';
 // =============================================================
 
 export interface MemoryConfig {
-  stmCapacity: number;      // Short-term memory capacity
-  ltmThreshold: number;     // Similarity threshold for LTM retrieval
+  stmCapacity: number;
+  ltmThreshold: number;
   embeddingModel: string;
   cacheSize: number;
   cacheTTL: number;
@@ -25,7 +26,7 @@ const DEFAULT_CONFIG: MemoryConfig = {
 };
 
 // =============================================================
-// Embedding Cache
+// Persistent Embedding Cache
 // =============================================================
 
 interface CacheEntry {
@@ -34,53 +35,76 @@ interface CacheEntry {
   hits: number;
 }
 
-class EmbeddingCache {
-  private cache = new Map<string, CacheEntry>();
+class PersistentEmbeddingCache {
+  private storage: DurableObjectStorage;
   private maxSize: number;
   private ttl: number;
+  private memoryCache = new Map<string, CacheEntry>();
 
-  constructor(maxSize: number, ttl: number) {
+  constructor(storage: DurableObjectStorage, maxSize: number, ttl: number) {
+    this.storage = storage;
     this.maxSize = maxSize;
     this.ttl = ttl;
   }
 
-  get(key: string): number[] | null {
-    const entry = this.cache.get(key);
-    if (!entry) return null;
+  async get(key: string): Promise<number[] | null> {
+    // Check memory cache first
+    const memCached = this.memoryCache.get(key);
+    if (memCached && Date.now() - memCached.timestamp < this.ttl) {
+      memCached.hits++;
+      return memCached.embedding;
+    }
 
-    // Check TTL
-    if (Date.now() - entry.timestamp > this.ttl) {
-      this.cache.delete(key);
+    // Check persistent storage
+    try {
+      const stored = await this.storage.get<CacheEntry>(`emb:${key}`);
+      if (!stored) return null;
+      
+      if (Date.now() - stored.timestamp > this.ttl) {
+        await this.storage.delete(`emb:${key}`);
+        return null;
+      }
+      
+      stored.hits++;
+      
+      // Update both caches
+      this.memoryCache.set(key, stored);
+      await this.storage.put(`emb:${key}`, stored);
+      
+      return stored.embedding;
+    } catch (e) {
+      console.warn('[Cache] Get failed:', e);
       return null;
     }
-
-    // Update hit count and move to end (LRU)
-    entry.hits++;
-    this.cache.delete(key);
-    this.cache.set(key, entry);
-
-    return entry.embedding;
   }
 
-  set(key: string, embedding: number[]): void {
-    if (this.cache.size >= this.maxSize) {
-      this.evictLRU();
-    }
-
-    this.cache.set(key, {
+  async set(key: string, embedding: number[]): Promise<void> {
+    const entry: CacheEntry = {
       embedding,
       timestamp: Date.now(),
       hits: 0,
-    });
+    };
+
+    // Update memory cache
+    if (this.memoryCache.size >= this.maxSize) {
+      this.evictLRU();
+    }
+    this.memoryCache.set(key, entry);
+
+    // Update persistent storage
+    try {
+      await this.storage.put(`emb:${key}`, entry);
+    } catch (e) {
+      console.warn('[Cache] Set failed:', e);
+    }
   }
 
   private evictLRU(): void {
-    // Evict entry with lowest score (hits / age)
     let minScore = Infinity;
     let minKey: string | null = null;
     const now = Date.now();
 
-    for (const [key, entry] of this.cache.entries()) {
+    for (const [key, entry] of this.memoryCache.entries()) {
       const age = Math.max(now - entry.timestamp, 1);
       const score = entry.hits / (age / 1000);
       if (score < minScore) {
@@ -89,15 +113,24 @@ class EmbeddingCache {
       }
     }
 
-    if (minKey) this.cache.delete(minKey);
+    if (minKey) this.memoryCache.delete(minKey);
   }
 
-  clear(): void {
-    this.cache.clear();
+  async clear(): Promise<void> {
+    this.memoryCache.clear();
+    
+    try {
+      const keys = await this.storage.list<CacheEntry>({ prefix: 'emb:' });
+      for (const key of keys.keys()) {
+        await this.storage.delete(key);
+      }
+    } catch (e) {
+      console.warn('[Cache] Clear failed:', e);
+    }
   }
 
   get size(): number {
-    return this.cache.size;
+    return this.memoryCache.size;
   }
 }
 
@@ -110,9 +143,8 @@ export class MemoryManager {
   private gemini: GeminiClient;
   private sessionId: string;
   private config: MemoryConfig;
-  private embeddingCache: EmbeddingCache;
+  private embeddingCache: PersistentEmbeddingCache;
 
-  // Metrics
   private metrics = {
     cacheHits: 0,
     cacheMisses: 0,
@@ -124,13 +156,15 @@ export class MemoryManager {
     vectorize: VectorizeIndex | null,
     gemini: GeminiClient,
     sessionId: string,
+    storage: DurableObjectStorage,
     config: Partial<MemoryConfig> = {}
   ) {
     this.vectorize = vectorize;
     this.gemini = gemini;
     this.sessionId = sessionId;
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.embeddingCache = new EmbeddingCache(
+    this.embeddingCache = new PersistentEmbeddingCache(
+      storage,
       this.config.cacheSize,
       this.config.cacheTTL
     );
@@ -143,8 +177,7 @@ export class MemoryManager {
   async generateEmbedding(text: string): Promise<number[]> {
     const cacheKey = this.hashText(text);
 
-    // Check cache
-    const cached = this.embeddingCache.get(cacheKey);
+    const cached = await this.embeddingCache.get(cacheKey);
     if (cached) {
       this.metrics.cacheHits++;
       return cached;
@@ -152,14 +185,12 @@ export class MemoryManager {
 
     this.metrics.cacheMisses++;
 
-    // Generate new embedding
     const embedding = await this.gemini.embedText(text, {
       model: this.config.embeddingModel,
       normalize: true,
     });
 
-    // Cache it
-    this.embeddingCache.set(cacheKey, embedding);
+    await this.embeddingCache.set(cacheKey, embedding);
     this.metrics.totalEmbeddings++;
 
     return embedding;
@@ -169,10 +200,9 @@ export class MemoryManager {
     const results: number[][] = [];
     const uncached: { index: number; text: string }[] = [];
 
-    // Check cache for each text
     for (let i = 0; i < texts.length; i++) {
       const cacheKey = this.hashText(texts[i]);
-      const cached = this.embeddingCache.get(cacheKey);
+      const cached = await this.embeddingCache.get(cacheKey);
       
       if (cached) {
         results[i] = cached;
@@ -183,18 +213,16 @@ export class MemoryManager {
       }
     }
 
-    // Batch generate uncached
     if (uncached.length > 0) {
       const newEmbeddings = await this.gemini.embedBatch(
         uncached.map(u => u.text),
         { model: this.config.embeddingModel, normalize: true }
       );
 
-      // Store results and cache
       for (let i = 0; i < uncached.length; i++) {
         const { index, text } = uncached[i];
         results[index] = newEmbeddings[i];
-        this.embeddingCache.set(this.hashText(text), newEmbeddings[i]);
+        await this.embeddingCache.set(this.hashText(text), newEmbeddings[i]);
       }
 
       this.metrics.totalEmbeddings += uncached.length;
@@ -361,71 +389,13 @@ export class MemoryManager {
   // -----------------------------------------------------------
 
   async clearSessionMemory(): Promise<void> {
-    if (!this.vectorize) return;
-
-    // Vectorize doesn't support bulk delete by filter
-    // This would need to be implemented with a list + delete loop
-    // For now, we just clear the cache
-    this.embeddingCache.clear();
+    await this.embeddingCache.clear();
     console.log(`[Memory] Cleared cache for session ${this.sessionId}`);
   }
 
   async deleteMemory(id: string): Promise<void> {
     if (!this.vectorize) return;
     await this.vectorize.deleteByIds([id]);
-  }
-
-  // -----------------------------------------------------------
-  // Summarization
-  // -----------------------------------------------------------
-
-  async summarizeConversation(
-    messages: Array<{ role: string; content: string }>
-  ): Promise<string> {
-    if (messages.length === 0) return '';
-
-    const conversation = messages
-      .map(m => `${m.role}: ${m.content}`)
-      .join('\n');
-
-    const prompt = `Summarize this conversation in 2-3 sentences, capturing the key topics and outcomes:
-
-${conversation}
-
-Summary:`;
-
-    const response = await this.gemini.generateWithTools(
-      [{ role: 'user', content: prompt }],
-      [],
-      { stream: false, temperature: 0.3 }
-    );
-
-    return response.text.trim();
-  }
-
-  async extractTopics(text: string): Promise<string[]> {
-    const prompt = `Extract 3-5 key topics from this text. Return as JSON array of strings.
-
-Text: ${text}
-
-Topics:`;
-
-    try {
-      const response = await this.gemini.generateWithTools(
-        [{ role: 'user', content: prompt }],
-        [],
-        { stream: false, temperature: 0.2 }
-      );
-
-      const match = response.text.match(/\[[\s\S]*\]/);
-      if (match) {
-        return JSON.parse(match[0]);
-      }
-    } catch (e) {
-      console.warn('[Memory] Topic extraction failed:', e);
-    }
-
-    return [];
   }
 
   // -----------------------------------------------------------
