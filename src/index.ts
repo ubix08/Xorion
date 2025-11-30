@@ -1,4 +1,4 @@
-// src/index.ts - Worker with Workflow Endpoints
+// src/index.ts - Worker with Fixed Session Management
 
 import { OrionAgent } from './durable-agent';
 import { D1Manager } from './storage/d1-manager';
@@ -8,7 +8,10 @@ import type { DurableObjectStub } from '@cloudflare/workers-types';
 
 export { OrionAgent };
 
-// Helper functions
+// =============================================================
+// Helper Functions
+// =============================================================
+
 function getSessionId(request: Request): string | null {
   const url = new URL(request.url);
   return url.searchParams.get('session_id') || request.headers.get('X-Session-ID') || null;
@@ -17,7 +20,7 @@ function getSessionId(request: Request): string | null {
 function jsonResponse(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 
+    headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
     },
@@ -28,12 +31,15 @@ function errorResponse(error: string, status = 500): Response {
   return jsonResponse({ error }, status);
 }
 
+// Fixed session validation - allows alphanumeric, hyphens, underscores
 function isValidSessionId(sessionId: string): boolean {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  return uuidRegex.test(sessionId);
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(sessionId);
 }
 
-// RPC Routing
+// =============================================================
+// RPC Routing (Fixed - Synchronous Session Creation)
+// =============================================================
+
 async function routeToRPC(
   request: Request,
   env: Env,
@@ -46,22 +52,20 @@ async function routeToRPC(
   }
 
   if (!isValidSessionId(sessionId)) {
-    return errorResponse('Invalid session ID format', 400);
+    return errorResponse('Invalid session ID format (alphanumeric, hyphens, underscores, 1-64 chars)', 400);
   }
 
   try {
     const id = env.AGENT.idFromName(`session:${sessionId}`);
     const stub = env.AGENT.get(id) as DurableObjectStub<OrionRPC>;
 
-    // Ensure session in D1
+    // Ensure session exists in D1 SYNCHRONOUSLY (fixed race condition)
     if (env.DB) {
-      ctx.waitUntil(
-        (async () => {
-          const d1 = new D1Manager(env.DB!);
-          const existing = await d1.getSession(sessionId);
-          if (!existing) await d1.createSession(sessionId);
-        })().catch(() => {})
-      );
+      const d1 = new D1Manager(env.DB);
+      const existing = await d1.getSession(sessionId);
+      if (!existing) {
+        await d1.createSession(sessionId);
+      }
     }
 
     const url = new URL(request.url);
@@ -180,7 +184,10 @@ async function routeToRPC(
   }
 }
 
+// =============================================================
 // WebSocket Routing
+// =============================================================
+
 async function routeToWebSocket(
   request: Request,
   env: Env,
@@ -196,14 +203,13 @@ async function routeToWebSocket(
     const id = env.AGENT.idFromName(`session:${sessionId}`);
     const stub = env.AGENT.get(id);
 
+    // Ensure session in D1
     if (env.DB) {
-      ctx.waitUntil(
-        (async () => {
-          const d1 = new D1Manager(env.DB!);
-          const existing = await d1.getSession(sessionId);
-          if (!existing) await d1.createSession(sessionId);
-        })().catch(() => {})
-      );
+      const d1 = new D1Manager(env.DB);
+      const existing = await d1.getSession(sessionId);
+      if (!existing) {
+        await d1.createSession(sessionId);
+      }
     }
 
     return await stub.fetch(request);
@@ -213,7 +219,10 @@ async function routeToWebSocket(
   }
 }
 
+// =============================================================
 // Main Worker
+// =============================================================
+
 export default {
   async fetch(
     request: Request,
@@ -265,7 +274,7 @@ export default {
         return jsonResponse({
           status: 'ok',
           name: 'ORION AI-Collaborator',
-          version: '5.0.0',
+          version: '5.0.0-refactored',
           architecture: 'Conversational with Workflow Templates',
           d1: d1Status,
           workspace: workspaceStatus,
